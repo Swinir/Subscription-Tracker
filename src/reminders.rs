@@ -1,7 +1,7 @@
 //! Payment reminders: a system notification a few days before a payment, and
 //! (on Windows) opening the app when the person signs in so reminders arrive.
 
-use crate::model::{format_money, Data, Subscription};
+use crate::model::{format_money, Data, Status, Subscription};
 use chrono::NaiveDate;
 
 /// Active subscriptions with a payment between today and `days` from now, soonest first.
@@ -47,6 +47,43 @@ pub fn cancel_line(s: &Subscription, by: NaiveDate, payment: NaiveDate, today: N
 pub fn over_budget(data: &Data) -> Option<f64> {
     let over = data.monthly_total() - data.budget;
     (data.budget > 0.0 && over > 0.004).then_some(over)
+}
+
+/// Paused subscriptions that start again between today and `days` from now, soonest first.
+pub fn resuming_soon(data: &Data, today: NaiveDate, days: u32) -> Vec<&Subscription> {
+    let mut v: Vec<&Subscription> = data
+        .subscriptions
+        .iter()
+        .filter(|s| s.status == Status::Paused && s.resume_on.is_some_and(|d| d >= today && (d - today).num_days() <= days as i64))
+        .collect();
+    v.sort_by_key(|s| s.resume_on);
+    v
+}
+
+/// "Meal kit box: paused, restarts in 3 days at €59.00".
+pub fn resume_line(s: &Subscription, today: NaiveDate) -> String {
+    let when_back = s.resume_on.map(|d| when(d, today)).unwrap_or_default();
+    format!("{}: paused, restarts {when_back} at {}", s.name, format_money(s.amount, &s.currency))
+}
+
+/// Tells about what hasn't been told yet, in one notification titled by `title(how many)`, and notes
+/// it as told: `items` are (subscription, day, line). Returns whether the notes changed.
+pub fn remind_once(
+    told: &mut Vec<(u64, NaiveDate)>,
+    today: NaiveDate,
+    items: Vec<(u64, NaiveDate, String)>,
+    title: impl Fn(usize) -> String,
+) -> bool {
+    let before = told.clone();
+    told.retain(|(_, d)| *d >= today);
+    let fresh: Vec<&(u64, NaiveDate, String)> = items.iter().filter(|(id, d, _)| !told.contains(&(*id, *d))).collect();
+    if !fresh.is_empty() {
+        let body = describe(fresh.iter().map(|(_, _, line)| line.clone()).collect(), 3);
+        if notify(&title(fresh.len()), &body) {
+            told.extend(fresh.iter().map(|(id, d, _)| (*id, *d)));
+        }
+    }
+    *told != before
 }
 
 pub fn when(d: NaiveDate, today: NaiveDate) -> String {
@@ -202,6 +239,21 @@ pub fn set_open_at_sign_in(on: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restarts_of_paused_subscriptions() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = crate::model::Data::default();
+        d.add_examples(today); // the paused meal kit restarts in 20 days
+        assert_eq!(super::resuming_soon(&d, today, 14).len(), 0);
+        let soon = super::resuming_soon(&d, today, 20);
+        assert_eq!(soon.len(), 1);
+        assert_eq!(super::resume_line(soon[0], today), "Meal kit box: paused, restarts in 20 days at €59.00");
+        // Not once it is active, and not a pause without a date.
+        let id = soon[0].id;
+        d.get_mut(id).unwrap().resume_on = None;
+        assert!(super::resuming_soon(&d, today, 365).is_empty());
+    }
+
     #[test]
     fn going_over_budget() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();

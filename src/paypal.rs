@@ -1216,6 +1216,8 @@ mod tests {
             manage_url: String::new(),
             payment_method: String::new(),
             tags: Vec::new(),
+            resume_on: None,
+            trial_ended_on: None,
         });
         let csv = "Datum;Uhrzeit;Name;Typ;Status;Währung;Brutto\n\
                    01.09.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\

@@ -57,6 +57,43 @@ impl TrackerApp {
             banner(ui, BLUE, "Cancel in time:", &reminders::describe(lines, 4).replace('\n', " · "));
         }
 
+        // Paused subscriptions that start again soon.
+        let restarts = reminders::resuming_soon(&self.data, today, remind_days);
+        if !restarts.is_empty() {
+            let lines = restarts.iter().map(|s| reminders::resume_line(s, today)).collect();
+            banner(ui, GREEN, "Restarting soon:", &reminders::describe(lines, 4).replace('\n', " · "));
+        }
+
+        // Free trials that ended: keep it, or cancel it?
+        let mut decision: Option<(u64, bool)> = None;
+        for s in self.data.subscriptions.iter().filter(|s| s.is_active() && s.trial_ended_on.is_some()).take(3) {
+            let ended = s.trial_ended_on.map(|d| d.format("%d %b").to_string()).unwrap_or_default();
+            let text = format!(
+                "{}'s free trial ended on {ended}; you now pay {} {}.",
+                s.name,
+                format_money(s.amount, &s.currency),
+                s.cycle.label().to_lowercase()
+            );
+            if let Some(keep) = decision_banner(ui, "Keep it?", &text) {
+                decision = Some((s.id, keep));
+            }
+        }
+        if let Some((id, keep)) = decision {
+            let mut note = None;
+            if let Some(s) = self.data.get_mut(id) {
+                s.trial_ended_on = None;
+                if !keep {
+                    s.status = Status::Cancelled;
+                    s.cancelled_on = Some(today);
+                    note = Some(format!("{} is marked as cancelled here. Remember to cancel it with the service too.", s.name));
+                }
+            }
+            self.dirty = true;
+            if let Some(note) = note {
+                self.notify(note);
+            }
+        }
+
         // The ones you say you rarely use, dearest first: the easiest savings.
         let mut rarely: Vec<(&Subscription, f64)> = self
             .data

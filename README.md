@@ -13,10 +13,12 @@ Everything stays on your computer. There's no account, and no server is involved
 - **Import from your bank or card**: load the transactions you download from your bank (CSV) and the app finds the payments that repeat, picking the shop out of the statement text. If it can't tell which column is which, you choose them.
 - **Import from PayPal**: load a PayPal activity download (CSV) and the app finds the payments that repeat. It understands file layouts in English, German, French, Spanish, Italian and Dutch, and PayPal business reports too. An example file is built in so you can try it without your own.
 - **Worth a second look**: say how much you use each subscription, and the ones you rarely use are listed on the Overview with what cancelling them would save. A notification also tells you when you go over your monthly budget.
+- **Pauses and trials**: give a paused subscription a restart date and it becomes active again that day, with a reminder before. When a free trial ends, the Overview asks whether to keep it or cancel it.
 - **Reminders**: a system notification a few days before a payment, and before the last day to cancel when a subscription needs notice. On Windows the app can open in the background when you sign in so reminders still arrive, and on Windows and macOS it can keep running in the system tray when you close the window.
 - **Multiple currencies**: amounts are converted using the European Central Bank's free daily reference rates. Nothing about you is sent.
 - **Backups**: copies of your list saved to a folder of your choice, such as one that OneDrive, Google Drive, Dropbox, iCloud or Proton Drive keeps in sync.
 - **Your own organisation**: your own categories (add, rename, recolour), tags, what pays for each subscription (so you know what to update when a card expires), and the page where you cancel it.
+- **Quick add**: start typing a name and well-known services are offered, filling in the name, website and category in a click. Only one copy of the app runs at a time: starting it again brings the open window forward.
 - **Calendar export**: the next 12 months of payments, and last days to cancel, as a calendar file (.ics) for any calendar app.
 - **CSV export** (and reading that spreadsheet back in, for example on another computer), shop logos, and light and dark themes.
 

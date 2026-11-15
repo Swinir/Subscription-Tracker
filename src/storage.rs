@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 
 /// Where the list is kept: the app's folder in the system's app-data folder, or the folder
 /// named by `SUBSCRIPTION_TRACKER_DATA` (to keep it on a USB stick, or to try the app out).
-pub fn data_path() -> PathBuf {
-    let dir = match std::env::var_os("SUBSCRIPTION_TRACKER_DATA").filter(|d| !d.is_empty()) {
+pub fn data_dir() -> PathBuf {
+    match std::env::var_os("SUBSCRIPTION_TRACKER_DATA").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("SubscriptionTracker"),
-    };
-    dir.join("subscriptions.json")
+    }
+}
+
+pub fn data_path() -> PathBuf {
+    data_dir().join("subscriptions.json")
 }
 
 pub enum Loaded {
@@ -95,6 +98,8 @@ pub fn import_csv(text: &str) -> Result<Vec<Subscription>, String> {
             manage_url: crate::model::clean_url(get("Cancel page")).unwrap_or_default(),
             payment_method: get("Paid with").to_string(),
             tags: parse_tags(&get("Tags").replace(';', ",")),
+            resume_on: day("Resumes on").filter(|_| get("Status") == Status::Paused.label()),
+            trial_ended_on: None,
         });
     }
     Ok(out)
@@ -106,7 +111,7 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
         "Name", "Amount", "Currency", "Billing cycle", "Next payment", "Monthly cost", "Yearly cost", "Category", "Status",
         "Added from", "Notes", "Website", "Shared by", "Free trial until", "Started on", "Cancelled on", "Payments so far",
         "Paid so far", "Days of notice to cancel", "Still using it?",
-        "Cancel page", "Paid with", "Tags",
+        "Cancel page", "Paid with", "Tags", "Resumes on",
     ])
     .map_err(|e| e.to_string())?;
     let day = |d: Option<chrono::NaiveDate>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
@@ -135,6 +140,7 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
             s.manage_url.clone(),
             s.payment_method.clone(),
             s.tags.join("; "),
+            day(s.resume_on),
         ])
         .map_err(|e| e.to_string())?;
     }
@@ -168,8 +174,8 @@ mod tests {
                 (b.trial_until, b.started_on, b.notice_days, &b.category, b.usage)
             );
             assert_eq!(
-                (&a.manage_url, &a.payment_method, &a.tags),
-                (&b.manage_url, &b.payment_method, &b.tags));
+                (&a.manage_url, &a.payment_method, &a.tags, a.resume_on),
+                (&b.manage_url, &b.payment_method, &b.tags, b.resume_on));
         }
         // A spreadsheet from before the newer columns existed still reads.
         let old = "Name,Amount,Currency,Billing cycle,Next payment,Monthly cost\nNews,5.00,EUR,Monthly,2026-12-01,5.00\n";
