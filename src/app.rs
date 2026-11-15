@@ -2,7 +2,7 @@
 
 use crate::model::*;
 use crate::paypal::{self, Columns, DateOrder, ImportResult};
-use crate::{backup, logos, reminders, tray};
+use crate::{backup, instance, logos, reminders, services, tray};
 use crate::storage::{self, Loaded};
 use crate::theme::{self, *};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -134,6 +134,8 @@ pub struct TrackerApp {
     hidden: bool,
     /// Quit was asked for: closing the window really closes the app.
     quitting: bool,
+    /// Raised when another copy of the app was started: this one comes to the front instead.
+    show_requests: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Whether the app opens at sign-in (asked of Windows when Settings is first shown).
     sign_in: Option<bool>,
     /// Cloud folders found on this computer (looked for when Settings is first shown).
@@ -235,6 +237,7 @@ impl TrackerApp {
             tray_next: String::new(),
             hidden: false,
             quitting: false,
+            show_requests: persist.then(|| instance::watch(cc.egui_ctx.clone())),
             sign_in: None,
             clouds: None,
             backups: None,
@@ -778,6 +781,9 @@ impl eframe::App for TrackerApp {
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(5 * 60));
 
+        if self.show_requests.as_ref().is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed)) {
+            self.show_window(ctx);
+        }
         self.tray_tick(ctx);
 
         self.handle_dropped_files(ctx);

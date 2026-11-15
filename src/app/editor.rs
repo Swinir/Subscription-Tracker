@@ -87,6 +87,26 @@ impl TrackerApp {
                 ui.add(field(&mut ed.name, "e.g. Music service", 320.0));
                 ui.end_row();
 
+                // A new subscription: well-known services matching what is typed, a click to fill them in.
+                let suggestions = if ed.id.is_none() { services::suggest(&ed.name, 5) } else { Vec::new() };
+                if !suggestions.is_empty() {
+                    ui.label(RichText::new("Suggestions").size(12.0).color(MUTED()));
+                    ui.horizontal_wrapped(|ui| {
+                        for service in suggestions {
+                            if ui.small_button(service.name).on_hover_text(format!("{} · {}", service.website, service.category)).clicked() {
+                                ed.name = service.name.to_string();
+                                if ed.website.trim().is_empty() {
+                                    ed.website = service.website.to_string();
+                                }
+                                if let Some(own) = categories.iter().find(|c| c.eq_ignore_ascii_case(service.category)) {
+                                    ed.category = own.clone();
+                                }
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+
                 ui.label("Price");
                 ui.horizontal(|ui| {
                     ui.add(field(&mut ed.amount, "9.99", 110.0));

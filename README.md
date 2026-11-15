@@ -17,6 +17,7 @@ Everything stays on your computer. There's no account, and no server is involved
 - **Multiple currencies**: amounts are converted using the European Central Bank's free daily reference rates. Nothing about you is sent.
 - **Backups**: copies of your list saved to a folder of your choice, such as one that OneDrive, Google Drive, Dropbox, iCloud or Proton Drive keeps in sync.
 - **Your own organisation**: your own categories (add, rename, recolour), tags, what pays for each subscription (so you know what to update when a card expires), and the page where you cancel it.
+- **Quick add**: start typing a name and well-known services are offered, filling in the name, website and category in a click. Only one copy of the app runs at a time: starting it again brings the open window forward.
 - **Calendar export**: the next 12 months of payments, and last days to cancel, as a calendar file (.ics) for any calendar app.
 - **CSV export** (and reading that spreadsheet back in, for example on another computer), shop logos, and light and dark themes.
 

@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 
 /// Where the list is kept: the app's folder in the system's app-data folder, or the folder
 /// named by `SUBSCRIPTION_TRACKER_DATA` (to keep it on a USB stick, or to try the app out).
-pub fn data_path() -> PathBuf {
-    let dir = match std::env::var_os("SUBSCRIPTION_TRACKER_DATA").filter(|d| !d.is_empty()) {
+pub fn data_dir() -> PathBuf {
+    match std::env::var_os("SUBSCRIPTION_TRACKER_DATA").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir),
         None => dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("SubscriptionTracker"),
-    };
-    dir.join("subscriptions.json")
+    }
+}
+
+pub fn data_path() -> PathBuf {
+    data_dir().join("subscriptions.json")
 }
 
 pub enum Loaded {

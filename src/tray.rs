@@ -27,22 +27,8 @@ mod imp {
         actions: Receiver<Action>,
     }
 
-    /// A purple ring with a dot, drawn here so no image file is needed.
     fn icon_image() -> Result<Icon, String> {
-        const SIZE: u32 = 32;
-        let [r, g, b, _] = crate::theme::ACCENT.to_array();
-        let centre = (SIZE as f32 - 1.0) / 2.0;
-        let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-        for y in 0..SIZE {
-            for x in 0..SIZE {
-                let d = ((x as f32 - centre).powi(2) + (y as f32 - centre).powi(2)).sqrt();
-                let ring = (d - 9.0).min(14.5 - d);
-                let dot = 4.0 - d;
-                let cover = (ring.max(dot) + 0.5).clamp(0.0, 1.0);
-                rgba.extend_from_slice(&[r, g, b, (cover * 255.0) as u8]);
-            }
-        }
-        Icon::from_rgba(rgba, SIZE, SIZE).map_err(|e| e.to_string())
+        Icon::from_rgba(crate::icon::rgba(32), 32, 32).map_err(|e| e.to_string())
     }
 
     impl Tray {

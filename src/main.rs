@@ -3,11 +3,14 @@
 mod app;
 mod backup;
 mod calendar;
+mod icon;
+mod instance;
 mod logos;
 mod model;
 mod paypal;
 mod rates;
 mod reminders;
+mod services;
 mod storage;
 mod theme;
 mod tray;
@@ -39,9 +42,27 @@ fn page_arg() -> Option<String> {
 fn main() -> eframe::Result<()> {
     let screenshot = screenshot_arg();
     let page = page_arg();
+    let background = std::env::args().any(|a| a == "--background");
+
+    // Two copies would overwrite each other's list: the second asks the first to come
+    // forward (unless it only started in the background) and quits.
+    let _only_copy = if screenshot.is_none() {
+        match instance::claim() {
+            instance::Claim::First(lock) => lock,
+            instance::Claim::AlreadyRunning => {
+                if !background {
+                    instance::ask_to_show();
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Subscription Tracker")
+        .with_icon(egui::IconData { rgba: icon::rgba(64), width: 64, height: 64 })
         .with_inner_size([1180.0, 760.0])
         .with_min_inner_size([900.0, 580.0]);
 
