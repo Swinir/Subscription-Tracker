@@ -21,6 +21,7 @@ impl TrackerApp {
                 shared_by: s.shared_by.max(1),
                 notice_days: s.notice_days,
                 usage: s.usage,
+                resume: s.resume_on.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
                 manage_url: s.manage_url.clone(),
                 payment_method: s.payment_method.clone(),
                 tags: s.tags.join(", "),
@@ -44,6 +45,7 @@ impl TrackerApp {
                 shared_by: 1,
                 notice_days: 0,
                 usage: None,
+                resume: String::new(),
                 manage_url: String::new(),
                 payment_method: String::new(),
                 tags: String::new(),
@@ -219,6 +221,15 @@ impl TrackerApp {
                 });
                 ui.end_row();
 
+                if ed.status == Status::Paused {
+                    ui.label("Restarts on");
+                    ui.horizontal(|ui| {
+                        ui.add(field(&mut ed.resume, "YYYY-MM-DD (optional)", 140.0));
+                        ui.label(RichText::new("it counts again from then on, and you're reminded before").size(12.0).color(MUTED()));
+                    });
+                    ui.end_row();
+                }
+
                 ui.label("Website");
                 ui.horizontal(|ui| {
                     ui.add(field(&mut ed.website, "e.g. netflix.com (for the logo)", 250.0));
@@ -321,6 +332,7 @@ impl TrackerApp {
             let amount = paypal::parse_amount(&ed.amount).map(|a| a.abs());
             let date = parse_user_date(&ed.date);
             let started = parse_user_date(&ed.started);
+            let resume = parse_user_date(&ed.resume).filter(|_| ed.status == Status::Paused);
             ed.error = if name.is_empty() {
                 Some("Please give it a name.".into())
             } else if amount.is_none() || amount == Some(0.0) {
@@ -331,6 +343,10 @@ impl TrackerApp {
                 Some("The trial end date has already passed; untick Free trial or change the date.".into())
             } else if !ed.website.trim().is_empty() && logos::clean_domain(&ed.website).is_none() {
                 Some("The website doesn't look right; write it like netflix.com (or leave it empty).".into())
+            } else if ed.status == Status::Paused && !ed.resume.trim().is_empty() && resume.is_none() {
+                Some("Please write the restart date like 2026-12-03 (or leave it empty).".into())
+            } else if resume.is_some_and(|d| d <= today) {
+                Some("The restart date has to be after today.".into())
             } else if !ed.manage_url.trim().is_empty() && clean_url(&ed.manage_url).is_none() {
                 Some("The cancel page address doesn't look right; write it like example.com/account (or leave it empty).".into())
             } else if !ed.started.trim().is_empty() && started.is_none() {
@@ -365,6 +381,8 @@ impl TrackerApp {
                     price_changes: Vec::new(),
                     notice_days: ed.notice_days,
                     usage: ed.usage,
+                    resume_on: resume,
+                    trial_ended_on: None,
                     manage_url: clean_url(&ed.manage_url).unwrap_or_default(),
                     payment_method: ed.payment_method.trim().to_string(),
                     tags: parse_tags(&ed.tags),

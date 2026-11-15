@@ -190,6 +190,12 @@ pub struct Subscription {
     /// Words to find it by.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The day a pause ends: it is active again from then on (None: paused until further notice).
+    #[serde(default)]
+    pub resume_on: Option<NaiveDate>,
+    /// The day its free trial ended without the person saying whether to keep it (asked on the Overview).
+    #[serde(default)]
+    pub trial_ended_on: Option<NaiveDate>,
 }
 
 /// A payment that went out: what you paid (your share) and when.
@@ -262,6 +268,12 @@ impl Subscription {
         edited.id = self.id;
         edited.paid = std::mem::take(&mut self.paid);
         edited.price_changes = std::mem::take(&mut self.price_changes);
+        // The question about a trial that ended stays until it is answered (or it is no longer running),
+        // and a restart date only means something while paused.
+        edited.trial_ended_on = self.trial_ended_on.filter(|_| edited.is_active());
+        if edited.status != Status::Paused {
+            edited.resume_on = None;
+        }
         edited.cancelled_on = match edited.status {
             Status::Cancelled => self.cancelled_on.or(Some(today)),
             _ => None,
@@ -364,6 +376,9 @@ pub struct Data {
     /// Last days to cancel already reminded about (subscription id, that day).
     #[serde(default)]
     pub reminded_cancel: Vec<(u64, NaiveDate)>,
+    /// Restarts of paused subscriptions already reminded about (subscription id, that day).
+    #[serde(default)]
+    pub reminded_resume: Vec<(u64, NaiveDate)>,
     /// The person was told about being over budget, and the total hasn't dropped under it since.
     #[serde(default)]
     pub over_budget_notified: bool,
@@ -454,6 +469,7 @@ impl Default for Data {
             remind_days: 3,
             reminded: Vec::new(),
             reminded_cancel: Vec::new(),
+            reminded_resume: Vec::new(),
             over_budget_notified: false,
             categories: CATEGORIES.iter().map(|c| c.to_string()).collect(),
             category_colors: BTreeMap::new(),
@@ -503,10 +519,22 @@ impl Data {
     pub fn roll_all_forward(&mut self, today: NaiveDate) -> bool {
         let mut changed = false;
         for s in &mut self.subscriptions {
+            // A pause with an end date ends on that day: the payments from then on count again.
+            if let (Status::Paused, Some(resume)) = (s.status, s.resume_on) {
+                if resume <= today {
+                    s.roll_forward(resume);
+                    s.status = Status::Active;
+                    s.resume_on = None;
+                    changed = true;
+                }
+            }
             changed |= s.roll_forward(today);
-            // A trial that ended is now a normal subscription.
-            if s.trial_until.map(|d| d < today).unwrap_or(false) {
+            // A trial that ended is now a normal subscription; the person is asked whether to keep it.
+            if let Some(end) = s.trial_until.filter(|d| *d < today) {
                 s.trial_until = None;
+                if s.is_active() {
+                    s.trial_ended_on = Some(end);
+                }
                 changed = true;
             }
         }
@@ -718,6 +746,9 @@ impl Data {
                     "Gym membership" | "Meal kit box" => vec!["health".to_string()],
                     _ => Vec::new(),
                 },
+                // The paused one is due back in three weeks.
+                resume_on: (name == "Meal kit box").then(|| today + Duration::days(20)),
+                trial_ended_on: None,
             };
             // A year of past payments (none for the one still in its free trial): rolling
             // forward from a year back logs them and lands on the same next payment.
@@ -1050,6 +1081,69 @@ mod tests {
         s.apply_edit(form, today);
         assert_eq!(s.cancelled_on, None);
         assert_eq!(s.saved_since_cancelling(today), None);
+    }
+
+    #[test]
+    fn a_pause_ends_on_its_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let id = d.find_by_name("Meal kit box").unwrap().id; // paused, weekly, next on today + 5
+        let resume = today + Duration::days(10);
+        d.get_mut(id).unwrap().resume_on = Some(resume);
+        // Still paused before the day: nothing logged, nothing changed.
+        d.roll_all_forward(today + Duration::days(3));
+        let s = d.find_by_name("Meal kit box").unwrap();
+        assert_eq!((s.status, s.resume_on, s.paid.len()), (Status::Paused, Some(resume), 0));
+        // On the day it is active again, next payment on its rhythm, and nothing is claimed for the pause.
+        d.roll_all_forward(today + Duration::days(12));
+        let s = d.find_by_name("Meal kit box").unwrap();
+        assert_eq!((s.status, s.resume_on, s.paid.len()), (Status::Active, None, 0));
+        assert_eq!(s.next_payment, today + Duration::days(12));
+        // From then on payments are logged.
+        d.roll_all_forward(today + Duration::days(13));
+        let s = d.find_by_name("Meal kit box").unwrap();
+        assert_eq!(s.paid.iter().map(|p| p.date).collect::<Vec<_>>(), vec![today + Duration::days(12)]);
+        // A restart date means nothing once active: editing drops it.
+        let mut form = s.clone();
+        form.resume_on = Some(today);
+        let mut s = s.clone();
+        s.apply_edit(form, today);
+        assert_eq!(s.resume_on, None);
+    }
+
+    #[test]
+    fn an_ended_trial_asks_to_keep_it() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let end = today + Duration::days(6); // the language course's trial
+        d.roll_all_forward(end);
+        let s = d.find_by_name("Language course app").unwrap();
+        assert_eq!((s.trial_until, s.trial_ended_on), (Some(end), None), "the trial lasts through its last day");
+        d.roll_all_forward(end + Duration::days(1));
+        let s = d.find_by_name("Language course app").unwrap();
+        assert_eq!((s.trial_until, s.trial_ended_on), (None, Some(end)));
+        assert_eq!(s.paid.iter().map(|p| p.date).collect::<Vec<_>>(), vec![end], "the first payment went out");
+        // The question stays through edits, and goes when cancelled.
+        let mut form = s.clone();
+        form.notes = "kept".into();
+        let mut kept = s.clone();
+        kept.apply_edit(form, end);
+        assert_eq!(kept.trial_ended_on, Some(end));
+        let mut form = s.clone();
+        form.status = Status::Cancelled;
+        let mut cancelled = s.clone();
+        cancelled.apply_edit(form, end);
+        assert_eq!(cancelled.trial_ended_on, None);
+        // A paused subscription's trial ending asks nothing.
+        let mut d = Data::default();
+        d.add_examples(today);
+        d.find_by_name("Language course app").unwrap();
+        let id = d.find_by_name("Language course app").unwrap().id;
+        d.get_mut(id).unwrap().status = Status::Paused;
+        d.roll_all_forward(end + Duration::days(1));
+        assert_eq!(d.find_by_name("Language course app").unwrap().trial_ended_on, None);
     }
 
     #[test]

@@ -67,6 +67,8 @@ struct Editor {
     shared_by: u32,
     notice_days: u32,
     usage: Option<Usage>,
+    /// The day a pause ends, as typed.
+    resume: String,
     manage_url: String,
     payment_method: String,
     /// The tags as typed, separated by commas.
@@ -395,35 +397,40 @@ impl TrackerApp {
             return;
         }
         let today = self.today;
-        let before = self.data.reminded.len();
-        self.data.reminded.retain(|(_, d)| *d >= today);
-        let due: Vec<&Subscription> = reminders::due_soon(&self.data, today, self.data.remind_days)
-            .into_iter()
-            .filter(|s| !self.data.reminded.contains(&(s.id, s.next_payment)))
+        let days = self.data.remind_days;
+        // Payments, last days to cancel and restarts of paused subscriptions: each told once, in a
+        // notification of its own.
+        let payments: Vec<(u64, NaiveDate, String)> =
+            reminders::due_soon(&self.data, today, days).iter().map(|s| (s.id, s.next_payment, reminders::line(s, today))).collect();
+        let cancels: Vec<(u64, NaiveDate, String)> = reminders::cancel_soon(&self.data, today, days)
+            .iter()
+            .map(|(s, by, payment)| (s.id, *by, reminders::cancel_line(s, *by, *payment, today)))
             .collect();
-        if !due.is_empty() {
-            let title = if due.len() == 1 { "A payment is coming up".to_string() } else { format!("{} payments are coming up", due.len()) };
-            let body = reminders::describe(due.iter().map(|s| reminders::line(s, today)).collect(), 3);
-            let marks: Vec<(u64, NaiveDate)> = due.iter().map(|s| (s.id, s.next_payment)).collect();
-            if reminders::notify(&title, &body) {
-                self.data.reminded.extend(marks);
-            }
-        }
-        // The same for last days to cancel, in a notification of their own.
-        let before_cancel = self.data.reminded_cancel.len();
-        self.data.reminded_cancel.retain(|(_, d)| *d >= today);
-        let cancel: Vec<(&Subscription, NaiveDate, NaiveDate)> = reminders::cancel_soon(&self.data, today, self.data.remind_days)
-            .into_iter()
-            .filter(|(s, by, _)| !self.data.reminded_cancel.contains(&(s.id, *by)))
+        let restarts: Vec<(u64, NaiveDate, String)> = reminders::resuming_soon(&self.data, today, days)
+            .iter()
+            .filter_map(|s| s.resume_on.map(|d| (s.id, d, reminders::resume_line(s, today))))
             .collect();
-        if !cancel.is_empty() {
-            let title = if cancel.len() == 1 { "Last chance to cancel".to_string() } else { format!("Last chance to cancel {} subscriptions", cancel.len()) };
-            let body = reminders::describe(cancel.iter().map(|(s, by, payment)| reminders::cancel_line(s, *by, *payment, today)).collect(), 3);
-            let marks: Vec<(u64, NaiveDate)> = cancel.iter().map(|(s, by, _)| (s.id, *by)).collect();
-            if reminders::notify(&title, &body) {
-                self.data.reminded_cancel.extend(marks);
-            }
-        }
+        let plural_title = |one: &'static str, many: &'static str| {
+            move |n: usize| if n == 1 { one.to_string() } else { format!("{n} {many}") }
+        };
+        let mut changed = reminders::remind_once(
+            &mut self.data.reminded,
+            today,
+            payments,
+            plural_title("A payment is coming up", "payments are coming up"),
+        );
+        changed |= reminders::remind_once(
+            &mut self.data.reminded_cancel,
+            today,
+            cancels,
+            plural_title("Last chance to cancel", "last chances to cancel"),
+        );
+        changed |= reminders::remind_once(
+            &mut self.data.reminded_resume,
+            today,
+            restarts,
+            plural_title("A paused subscription restarts soon", "paused subscriptions restart soon"),
+        );
         // Being over the budget is told once, until the total has been back under it.
         match reminders::over_budget(&self.data) {
             Some(over) if !self.data.over_budget_notified => {
@@ -445,9 +452,7 @@ impl TrackerApp {
             }
             _ => {}
         }
-        if self.data.reminded.len() != before || self.data.reminded_cancel.len() != before_cancel {
-            self.dirty = true;
-        }
+        self.dirty |= changed;
     }
 
     // ---------- tray ----------
@@ -903,6 +908,31 @@ fn category_color(data: &Data, name: &str) -> Color32 {
         Some([r, g, b]) => Color32::from_rgb(r, g, b),
         None => theme::color_for(name),
     }
+}
+
+/// Like `banner`, asking a question with two buttons: true for "Keep it", false for "Cancel it".
+fn decision_banner(ui: &mut egui::Ui, title: &str, text: &str) -> Option<bool> {
+    let mut answer = None;
+    egui::Frame::new()
+        .fill(ORANGE.gamma_multiply(0.12))
+        .stroke(Stroke::new(1.0_f32, ORANGE.gamma_multiply(0.5)))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(title).strong().color(ORANGE));
+                ui.label(RichText::new(text).color(TEXT()));
+                if ui.button("Keep it").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel it").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+    ui.add_space(12.0);
+    answer
 }
 
 /// A coloured strip across the page: a short title, then what it's about.

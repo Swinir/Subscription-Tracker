@@ -198,6 +198,21 @@ impl TrackerApp {
                     FontId::proportional(12.0),
                     MUTED(),
                 );
+            } else if let (Status::Paused, Some(day)) = (s.status, s.resume_on) {
+                clip(c4).text(
+                    pos2(c4.left(), cy - 9.0),
+                    Align2::LEFT_CENTER,
+                    format!("Back {}", relative_day(day, today).to_lowercase()),
+                    FontId::proportional(14.0),
+                    TEXT(),
+                );
+                clip(c4).text(
+                    pos2(c4.left(), cy + 10.0),
+                    Align2::LEFT_CENTER,
+                    day.format("%d %b %Y").to_string(),
+                    FontId::proportional(12.0),
+                    MUTED(),
+                );
             } else if let (Some(day), Some(saved)) = (s.cancelled_on, s.saved_since_cancelling(today)) {
                 clip(c4).text(
                     pos2(c4.left(), cy - 9.0),

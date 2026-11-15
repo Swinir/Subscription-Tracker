@@ -489,6 +489,8 @@ impl TrackerApp {
                         manage_url: String::new(),
                         payment_method: String::new(),
                         tags: Vec::new(),
+                        resume_on: None,
+                        trial_ended_on: None,
                         trial_until: None,
                         shared_by: 1,
                         id: 0,
