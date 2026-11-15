@@ -191,13 +191,7 @@ impl TrackerApp {
         let up_logos: Vec<Option<egui::TextureHandle>> = upcoming.iter().map(|s| self.logo(&ctx, &s.website)).collect();
         let mut open_id = None;
 
-        let mut by_cat: BTreeMap<String, f64> = BTreeMap::new();
-        for (s, r) in &in_main {
-            let c = if s.category.is_empty() { "Other".to_string() } else { s.category.clone() };
-            *by_cat.entry(c).or_default() += s.monthly_cost() * r;
-        }
-        let mut cats: Vec<(String, f64)> = by_cat.into_iter().collect();
-        cats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let cats = self.data.monthly_by_category();
 
         ui.columns(2, |c| {
             card_frame(PANEL()).show(&mut c[0], |ui| {
@@ -245,13 +239,19 @@ impl TrackerApp {
                 section_title(ui, "Monthly spending by category");
                 for (cat, value) in cats.iter().take(6) {
                     let share = if monthly > 0.0 { value / monthly } else { 0.0 };
+                    let budget = self.data.category_budget(cat);
+                    let over = budget.is_some_and(|b| *value > b + 0.004);
                     ui.horizontal(|ui| {
                         let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                         ui.painter().circle_filled(dot.center(), 4.5, category_color(&self.data, cat));
                         ui.label(cat);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(RichText::new(format!("{:.0}%", share * 100.0)).color(MUTED()).size(12.5));
-                            ui.label(RichText::new(format_money(*value, &main)).strong());
+                            if let Some(b) = budget {
+                                ui.label(RichText::new(format!("of {}", format_money(b, &main))).color(MUTED()).size(12.5));
+                            }
+                            let amount = RichText::new(format_money(*value, &main)).strong();
+                            ui.label(if over { amount.color(RED) } else { amount });
                         });
                     });
                     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 7.0), Sense::hover());
@@ -259,7 +259,7 @@ impl TrackerApp {
                     p.rect_filled(bar, CornerRadius::same(4), BORDER());
                     let mut fill = bar;
                     fill.set_width((bar.width() * share as f32).max(6.0));
-                    p.rect_filled(fill, CornerRadius::same(4), category_color(&self.data, cat));
+                    p.rect_filled(fill, CornerRadius::same(4), if over { RED } else { category_color(&self.data, cat) });
                     ui.add_space(6.0);
                 }
                 if cats.len() > 6 {

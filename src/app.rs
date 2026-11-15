@@ -2,7 +2,7 @@
 
 use crate::model::*;
 use crate::paypal::{self, Columns, DateOrder, ImportResult};
-use crate::{backup, instance, logos, reminders, services, tray};
+use crate::{backup, instance, logos, reminders, review, services, tray};
 use crate::storage::{self, Loaded};
 use crate::theme::{self, *};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -151,6 +151,10 @@ pub struct TrackerApp {
     new_category: String,
     /// The category being renamed, and the name typed for it so far.
     renaming: Option<(String, String)>,
+    /// The monthly budget typed for each category so far.
+    category_budget_texts: BTreeMap<String, String>,
+    /// The year shown in the year in review (the latest one with payments when none is picked).
+    review_year: Option<i32>,
     /// The month shown in the calendar.
     cal_month: NaiveDate,
     /// A download of exchange rates under way, and whether the person asked for it.
@@ -248,6 +252,8 @@ impl TrackerApp {
             budget_text: String::new(),
             new_category: String::new(),
             renaming: None,
+            category_budget_texts: BTreeMap::new(),
+            review_year: None,
             cal_month: insights::month_start(today),
             rates_job: None,
             rates_tried: false,
@@ -446,12 +452,14 @@ impl TrackerApp {
                     self.dirty = true;
                 }
             }
-            None if self.data.over_budget_notified => {
+            // Back under it with some room: the next time over is news again.
+            _ if self.data.over_budget_notified && reminders::back_under(self.data.monthly_total(), self.data.budget) => {
                 self.data.over_budget_notified = false;
                 self.dirty = true;
             }
             _ => {}
         }
+        changed |= reminders::tell_categories_over_budget(&mut self.data);
         self.dirty |= changed;
     }
 

@@ -86,6 +86,52 @@ pub fn remind_once(
     *told != before
 }
 
+/// Whether spending is back under a budget with some room to spare. Until then, being over it
+/// again is not news: spending that hovers around the budget would otherwise notify again and again.
+pub fn back_under(spent: f64, budget: f64) -> bool {
+    budget <= 0.0 || spent <= budget * 0.97
+}
+
+/// The categories over their own monthly budget: name, spent, budget; the most over first.
+pub fn categories_over_budget(data: &Data) -> Vec<(String, f64, f64)> {
+    let mut over: Vec<(String, f64, f64)> = data
+        .monthly_by_category()
+        .into_iter()
+        .filter_map(|(name, spent)| data.category_budget(&name).filter(|b| spent > *b + 0.004).map(|b| (name, spent, b)))
+        .collect();
+    over.sort_by(|a, b| (b.1 - b.2).partial_cmp(&(a.1 - a.2)).unwrap_or(std::cmp::Ordering::Equal));
+    over
+}
+
+/// Tells once about the categories that went over their budget, and forgets those that are back
+/// under it. Returns whether the notes changed.
+pub fn tell_categories_over_budget(data: &mut Data) -> bool {
+    let before = data.over_budget_categories.clone();
+    let spending = data.monthly_by_category();
+    let kept: Vec<String> = before
+        .iter()
+        .filter(|name| {
+            let spent = spending.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or(0.0, |(_, v)| *v);
+            data.category_budget(name).is_some_and(|budget| !back_under(spent, budget))
+        })
+        .cloned()
+        .collect();
+    data.over_budget_categories = kept;
+    let fresh: Vec<(String, f64, f64)> = categories_over_budget(data)
+        .into_iter()
+        .filter(|(name, _, _)| !data.over_budget_categories.iter().any(|c| c.eq_ignore_ascii_case(name)))
+        .collect();
+    if !fresh.is_empty() {
+        let main = &data.main_currency;
+        let lines = fresh.iter().map(|(n, spent, budget)| format!("{n}: {} of {} a month", format_money(*spent, main), format_money(*budget, main))).collect();
+        let title = if fresh.len() == 1 { "A category is over budget".to_string() } else { format!("{} categories are over budget", fresh.len()) };
+        if notify(&title, &describe(lines, 3)) {
+            data.over_budget_categories.extend(fresh.into_iter().map(|(name, _, _)| name));
+        }
+    }
+    data.over_budget_categories != before
+}
+
 pub fn when(d: NaiveDate, today: NaiveDate) -> String {
     match (d - today).num_days() {
         0 => "today".into(),
@@ -252,6 +298,24 @@ mod tests {
         let id = soon[0].id;
         d.get_mut(id).unwrap().resume_on = None;
         assert!(super::resuming_soon(&d, today, 365).is_empty());
+    }
+
+    #[test]
+    fn categories_over_their_budget() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = crate::model::Data::default();
+        d.add_examples(today); // software costs 24.16 a month
+        d.category_budgets.insert("Software".into(), 20.0);
+        d.category_budgets.insert("Music".into(), 50.0);
+        let over = super::categories_over_budget(&d);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].0, "Software");
+        assert!((over[0].1 - (239.88 + 49.99) / 12.0).abs() < 1e-9 && over[0].2 == 20.0);
+        d.category_budgets.insert("Software".into(), 30.0);
+        assert!(super::categories_over_budget(&d).is_empty());
+        // Back under means with a little room: hovering around the budget is not news each time.
+        assert!(super::back_under(19.3, 20.0) && !super::back_under(19.5, 20.0) && !super::back_under(25.0, 20.0));
+        assert!(super::back_under(5.0, 0.0), "no budget, nothing to be over");
     }
 
     #[test]
