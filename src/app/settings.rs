@@ -190,6 +190,20 @@ impl TrackerApp {
                         }
                     }
                 }
+                if plain_button(ui, "Add from a spreadsheet…", 210.0)
+                    .on_hover_text("Reads back a spreadsheet exported here, for example from another computer.")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new().set_title("Choose a spreadsheet exported here").add_filter("CSV", &["csv"]).pick_file() {
+                        match std::fs::read(&path) {
+                            Ok(bytes) if storage::is_own_csv(&paypal::decode_bytes(&bytes)) => {
+                                self.load_import(String::new(), paypal::decode_bytes(&bytes));
+                            }
+                            Ok(_) => self.notify("That isn't a spreadsheet exported here. For a bank or PayPal file, use Import payments."),
+                            Err(e) => self.notify(format!("Couldn't open the file: {e}")),
+                        }
+                    }
+                }
                 if self.persist && plain_button(ui, "Open the data folder", 190.0).clicked() {
                     if let Some(dir) = storage::data_path().parent() {
                         let _ = std::fs::create_dir_all(dir);
@@ -211,9 +225,7 @@ impl TrackerApp {
                 }
                 let examples = self.data.subscriptions.iter().filter(|s| s.notes == "Example").count();
                 if examples > 0 && plain_button(ui, "Remove the examples", 190.0).clicked() {
-                    self.data.subscriptions.retain(|s| s.notes != "Example");
-                    self.dirty = true;
-                    self.notify(format!("Removed {examples} example{}", plural(examples)));
+                    self.delete_with_undo(|s| s.notes == "Example", format!("Removed {examples} example{}", plural(examples)));
                 }
                 let del = egui::Button::new(RichText::new("Delete all subscriptions").color(RED))
                     .fill(FIELD())

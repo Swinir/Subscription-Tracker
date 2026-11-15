@@ -678,8 +678,10 @@ pub fn analyse(text: &str, order: DateOrder, cols: Columns, today: NaiveDate, ex
 fn classify(days: i64) -> Option<Cycle> {
     match days {
         5..=10 => Some(Cycle::Weekly),
+        12..=17 => Some(Cycle::Fortnightly),
         24..=38 => Some(Cycle::Monthly),
         80..=100 => Some(Cycle::Quarterly),
+        165..=200 => Some(Cycle::HalfYearly),
         340..=390 => Some(Cycle::Yearly),
         _ => None,
     }
@@ -688,8 +690,10 @@ fn classify(days: i64) -> Option<Cycle> {
 fn cycle_days(c: Cycle) -> i64 {
     match c {
         Cycle::Weekly => 7,
+        Cycle::Fortnightly => 14,
         Cycle::Monthly => 30,
         Cycle::Quarterly => 91,
+        Cycle::HalfYearly => 182,
         Cycle::Yearly => 365,
     }
 }
@@ -809,7 +813,7 @@ pub fn find_recurring(payments: &[Payment], today: NaiveDate, existing: &Data) -
                 let new_price_ok = !price_ok
                     && p.hinted
                     && last.hinted
-                    && c != Cycle::Weekly
+                    && !matches!(c, Cycle::Weekly | Cycle::Fortnightly)
                     && same_billing_day(last.date, p.date)
                     && (0.4..=2.5).contains(&ratio);
                 if !price_ok && !new_price_ok {
@@ -888,7 +892,7 @@ pub fn find_recurring(payments: &[Payment], today: NaiveDate, existing: &Data) -
             let strong = s.items.iter().any(|p| p.strong);
             let cycle = s.cycle.unwrap();
             // Two equal payments a month apart can be chance unless PayPal pays them automatically.
-            if n < 3 && (!hinted || cycle == Cycle::Weekly) {
+            if n < 3 && (!hinted || matches!(cycle, Cycle::Weekly | Cycle::Fortnightly)) {
                 continue;
             }
             // A subscription keeps its price most of the time: allow one change per 4 payments.
@@ -1049,6 +1053,24 @@ mod tests {
         let video = &r.candidates[0];
         assert_eq!((video.cycle, video.paid.len(), video.selected), (Cycle::Monthly, 10, true));
         assert!((video.amount - 12.99).abs() < 0.001);
+    }
+
+    #[test]
+    fn fortnightly_and_half_yearly_payments() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut csv = String::from("Date,Description,Amount\n");
+        let mut day = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        while day < today {
+            csv.push_str(&format!("{},VEG BOX CO,-18.00\n", day.format("%Y-%m-%d")));
+            day += Duration::days(14);
+        }
+        for d in ["2025-05-02", "2025-11-02", "2026-05-02", "2026-11-02"] {
+            csv.push_str(&format!("{d},CAR INSURANCE LTD,-210.00\n"));
+        }
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
+        let cycle = |name: &str| r.candidates.iter().find(|c| c.name == name).map(|c| c.cycle);
+        assert_eq!(cycle("Veg Box Co"), Some(Cycle::Fortnightly), "{:?}", r.candidates);
+        assert_eq!(cycle("Car Insurance Ltd"), Some(Cycle::HalfYearly), "{:?}", r.candidates);
     }
 
     #[test]

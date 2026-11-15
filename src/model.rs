@@ -7,19 +7,24 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Cycle {
     Weekly,
+    Fortnightly,
     Monthly,
     Quarterly,
+    HalfYearly,
     Yearly,
 }
 
 impl Cycle {
-    pub const ALL: [Cycle; 4] = [Cycle::Weekly, Cycle::Monthly, Cycle::Quarterly, Cycle::Yearly];
+    pub const ALL: [Cycle; 6] =
+        [Cycle::Weekly, Cycle::Fortnightly, Cycle::Monthly, Cycle::Quarterly, Cycle::HalfYearly, Cycle::Yearly];
 
     pub fn label(self) -> &'static str {
         match self {
             Cycle::Weekly => "Weekly",
+            Cycle::Fortnightly => "Every 2 weeks",
             Cycle::Monthly => "Monthly",
             Cycle::Quarterly => "Every 3 months",
+            Cycle::HalfYearly => "Every 6 months",
             Cycle::Yearly => "Yearly",
         }
     }
@@ -27,8 +32,10 @@ impl Cycle {
     pub fn per(self) -> &'static str {
         match self {
             Cycle::Weekly => "week",
+            Cycle::Fortnightly => "2 weeks",
             Cycle::Monthly => "month",
             Cycle::Quarterly => "3 months",
+            Cycle::HalfYearly => "6 months",
             Cycle::Yearly => "year",
         }
     }
@@ -36,8 +43,10 @@ impl Cycle {
     pub fn per_year(self) -> f64 {
         match self {
             Cycle::Weekly => 52.0,
+            Cycle::Fortnightly => 26.0,
             Cycle::Monthly => 12.0,
             Cycle::Quarterly => 4.0,
+            Cycle::HalfYearly => 2.0,
             Cycle::Yearly => 1.0,
         }
     }
@@ -47,8 +56,10 @@ impl Cycle {
     pub fn advance(self, d: NaiveDate, anchor_day: u32) -> NaiveDate {
         match self {
             Cycle::Weekly => d + Duration::days(7),
+            Cycle::Fortnightly => d + Duration::days(14),
             Cycle::Monthly => add_months(d, 1, anchor_day),
             Cycle::Quarterly => add_months(d, 3, anchor_day),
+            Cycle::HalfYearly => add_months(d, 6, anchor_day),
             Cycle::Yearly => add_months(d, 12, anchor_day),
         }
     }
@@ -438,10 +449,6 @@ impl Data {
         self.subscriptions.iter_mut().find(|s| s.id == id)
     }
 
-    pub fn remove(&mut self, id: u64) {
-        self.subscriptions.retain(|s| s.id != id);
-    }
-
     pub fn roll_all_forward(&mut self, today: NaiveDate) -> bool {
         let mut changed = false;
         for s in &mut self.subscriptions {
@@ -704,6 +711,19 @@ mod tests {
         assert_eq!(feb, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());
         let mar = Cycle::Monthly.advance(feb, 31);
         assert_eq!(mar, NaiveDate::from_ymd_opt(2026, 3, 31).unwrap());
+    }
+
+    #[test]
+    fn the_cycles_in_between() {
+        let d = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        assert_eq!(Cycle::Fortnightly.advance(d, 31), NaiveDate::from_ymd_opt(2026, 9, 14).unwrap());
+        // Six months on from 31 August is the end of February.
+        assert_eq!(Cycle::HalfYearly.advance(d, 31), NaiveDate::from_ymd_opt(2027, 2, 28).unwrap());
+        // Every cycle comes to the same yearly cost for the same money per year.
+        for c in Cycle::ALL {
+            assert!((c.per_year() * (120.0 / c.per_year()) - 120.0).abs() < 1e-9);
+            assert!(c.advance(d, 31) > d);
+        }
     }
 
     #[test]

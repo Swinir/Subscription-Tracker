@@ -41,12 +41,41 @@ impl TrackerApp {
     }
 
     pub(super) fn load_import(&mut self, name: String, text: String) {
+        // A spreadsheet this app exported isn't a statement to search: its lines are the subscriptions.
+        if storage::is_own_csv(&text) {
+            self.add_from_own_csv(&text);
+            return;
+        }
         self.import.file_name = Some(name);
         self.import.headers = paypal::column_names(&text);
         self.import.text = Some(text);
         self.import.order = DateOrder::Auto;
         self.import.cols = Columns::default();
         self.run_import();
+    }
+
+    /// Adds the subscriptions of a spreadsheet exported by this app, leaving out those already listed.
+    fn add_from_own_csv(&mut self, text: &str) {
+        let subs = match storage::import_csv(text) {
+            Ok(subs) => subs,
+            Err(e) => return self.notify(format!("Couldn't read that spreadsheet: {e}")),
+        };
+        let total = subs.len();
+        let mut added = 0;
+        for s in subs {
+            if !self.data.has_name(&s.name) {
+                self.data.add(s);
+                added += 1;
+            }
+        }
+        self.data.roll_all_forward(self.today);
+        self.dirty |= added > 0;
+        self.page = Page::Subscriptions;
+        let skipped = total - added;
+        self.notify(match skipped {
+            0 => format!("Added {added} subscription{} from your spreadsheet", plural(added)),
+            n => format!("Added {added} subscription{} from your spreadsheet; {n} already in your list", plural(added)),
+        });
     }
 
     pub(super) fn run_import(&mut self) {

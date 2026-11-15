@@ -110,6 +110,8 @@ pub struct TrackerApp {
     sort: SortBy,
     import: ImportState,
     toast: Option<(String, f32)>,
+    /// What was just deleted, to put back: it belongs to the toast with this text.
+    undo: Option<(String, Vec<Subscription>)>,
     screenshot: Option<PathBuf>,
     frames: u32,
     shot_sent_at: Option<u32>,
@@ -201,6 +203,7 @@ impl TrackerApp {
             sort: SortBy::NextPayment,
             import: ImportState::empty(),
             toast,
+            undo: None,
             screenshot,
             frames: 0,
             shot_sent_at: None,
@@ -229,6 +232,16 @@ impl TrackerApp {
 
     fn notify(&mut self, text: impl Into<String>) {
         self.toast = Some((text.into(), 4.0));
+    }
+
+    /// Deletes the subscriptions `gone` picks, saying `text` with an Undo button for a few seconds.
+    fn delete_with_undo(&mut self, gone: impl Fn(&Subscription) -> bool, text: impl Into<String>) {
+        let (removed, kept): (Vec<Subscription>, Vec<Subscription>) = std::mem::take(&mut self.data.subscriptions).into_iter().partition(gone);
+        self.data.subscriptions = kept;
+        let text = text.into();
+        self.toast = Some((text.clone(), 8.0));
+        self.undo = Some((text, removed));
+        self.dirty = true;
     }
 
     /// The shop's logo when logos are on and it's been downloaded.
@@ -511,7 +524,7 @@ impl TrackerApp {
             }
             Confirm::DeleteAll => (
                 "Delete all subscriptions?".to_string(),
-                format!("All {} subscriptions will be removed. This can't be undone.", self.data.subscriptions.len()),
+                format!("All {} subscriptions will be removed. You can undo it right afterwards.", self.data.subscriptions.len()),
                 "Delete",
                 RED,
             ),
@@ -554,13 +567,10 @@ impl TrackerApp {
         if yes {
             match self.confirm.take() {
                 Some(Confirm::Delete(id)) => {
-                    self.data.remove(id);
-                    self.notify("Deleted");
+                    let name = self.data.subscriptions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
+                    self.delete_with_undo(|s| s.id == id, format!("Deleted {name}"));
                 }
-                Some(Confirm::DeleteAll) => {
-                    self.data.subscriptions.clear();
-                    self.notify("Deleted all subscriptions");
-                }
+                Some(Confirm::DeleteAll) => self.delete_with_undo(|_| true, "Deleted all subscriptions"),
                 Some(Confirm::Restore(_, d)) => self.restore(*d),
                 None => {}
             }
@@ -572,13 +582,21 @@ impl TrackerApp {
 
     fn toast_ui(&mut self, ctx: &egui::Context) {
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        // The Undo button goes with its own toast only: once that is gone or replaced, so is the offer.
+        let shown = self.toast.as_ref().map(|(text, _)| text.as_str());
+        if self.undo.as_ref().is_some_and(|(of, _)| Some(of.as_str()) != shown) {
+            self.undo = None;
+        }
         let Some((text, left)) = &mut self.toast else { return };
         *left -= dt;
         if *left <= 0.0 {
             self.toast = None;
+            self.undo = None;
             return;
         }
         let text = text.clone();
+        let can_undo = self.undo.is_some();
+        let mut undo = false;
         egui::Area::new(egui::Id::new("toast"))
             .anchor(Align2::CENTER_BOTTOM, vec2(110.0, -24.0))
             .order(egui::Order::Tooltip)
@@ -589,9 +607,22 @@ impl TrackerApp {
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(Margin::symmetric(16, 10))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(text).color(STRONG()));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(text).color(STRONG()));
+                            if can_undo && ui.button("Undo").clicked() {
+                                undo = true;
+                            }
+                        });
                     });
             });
+        if undo {
+            if let Some((_, removed)) = self.undo.take() {
+                let n = removed.len();
+                self.data.subscriptions.extend(removed);
+                self.dirty = true;
+                self.notify(format!("Put back {n} subscription{}", plural(n)));
+            }
+        }
         ctx.request_repaint();
     }
 }
