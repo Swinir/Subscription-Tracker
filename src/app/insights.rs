@@ -428,6 +428,92 @@ impl TrackerApp {
                 }
             });
         }
+        // ----- a year in review -----
+        let years = review::years_with_data(&self.data);
+        if !years.is_empty() {
+            let year = self.review_year.filter(|y| years.contains(y)).unwrap_or(years[0]);
+            let r = review::year_review(&self.data, year);
+            let older = years.iter().copied().filter(|y| *y < year).max();
+            let newer = years.iter().copied().filter(|y| *y > year).min();
+            let mut go: Option<i32> = None;
+            ui.add_space(12.0);
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    section_title(ui, &format!("{year} in review"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled(newer.is_some(), egui::Button::new("▶")).on_hover_text("A later year").clicked() {
+                            go = newer;
+                        }
+                        if ui.add_enabled(older.is_some(), egui::Button::new("◀")).on_hover_text("An earlier year").clicked() {
+                            go = older;
+                        }
+                    });
+                });
+                ui.label(RichText::new(format!("{} paid", format_money(r.total, &main))).size(22.0).strong());
+                ui.label(RichText::new(format!("in {} payment{}", r.payments, plural(r.payments))).color(MUTED()).size(12.5));
+                if let Some(before) = r.previous_total {
+                    let diff = r.total - before;
+                    let (word, color) = if diff > 0.004 { ("up", RED) } else if diff < -0.004 { ("down", GREEN) } else { ("the same", MUTED()) };
+                    let text = if word == "the same" {
+                        format!("the same as in {}", year - 1)
+                    } else {
+                        format!("{word} {} ({:.0}%) on {}", format_money(diff.abs(), &main), diff.abs() / before * 100.0, year - 1)
+                    };
+                    ui.label(RichText::new(text).color(color));
+                }
+                ui.add_space(6.0);
+                let money_rows = |ui: &mut egui::Ui, title: &str, rows: &[(String, f64)], total: f64| {
+                    if rows.is_empty() {
+                        return;
+                    }
+                    ui.label(RichText::new(title).color(MUTED()).size(12.5));
+                    for (name, value) in rows {
+                        ui.horizontal(|ui| {
+                            ui.label(name.as_str());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if total > 0.0 {
+                                    ui.label(RichText::new(format!("{:.0}%", value / total * 100.0)).color(MUTED()).size(12.5));
+                                }
+                                ui.label(RichText::new(format_money(*value, &main)).strong());
+                            });
+                        });
+                    }
+                    ui.add_space(4.0);
+                };
+                money_rows(ui, "Most spent on", &r.top[..r.top.len().min(3)], r.total);
+                money_rows(ui, "By category", &r.by_category[..r.by_category.len().min(4)], r.total);
+                if !r.rises.is_empty() {
+                    let more: f64 = r.rises.iter().map(|x| x.1).sum();
+                    let names: Vec<String> = r.rises.iter().take(3).map(|(n, v)| format!("{n} +{}", format_money(*v, &main))).collect();
+                    ui.label(RichText::new("Price rises").color(MUTED()).size(12.5));
+                    ui.label(format!("{} rise{} added {} a year: {}", r.rises.len(), plural(r.rises.len()), format_money(more, &main), names.join(" · ")));
+                    ui.add_space(4.0);
+                }
+                if !r.started.is_empty() || !r.stopped.is_empty() {
+                    ui.label(RichText::new("Started and stopped").color(MUTED()).size(12.5));
+                    if !r.started.is_empty() {
+                        ui.label(format!("Started: {}", r.started.join(", ")));
+                    }
+                    if !r.stopped.is_empty() {
+                        ui.label(format!("Stopped: {}", r.stopped.join(", ")));
+                    }
+                    ui.add_space(4.0);
+                }
+                let mut note = "What this list remembers: payments are noted while a subscription is tracked here, or taken from an import.".to_string();
+                if let Some(from) = r.logged_from.filter(|d| d.year() == year && d.month() > 1) {
+                    note.push_str(&format!(" It has payments from {} on, so this year is incomplete.", from.format("%d %b %Y")));
+                }
+                if r.unconverted > 0 {
+                    note.push_str(&format!(" {} payment{} in another currency without a rate {} left out.", r.unconverted, plural(r.unconverted), if r.unconverted == 1 { "is" } else { "are" }));
+                }
+                ui.label(RichText::new(note).size(12.0).color(MUTED()));
+            });
+            if let Some(y) = go {
+                self.review_year = Some(y);
+            }
+        }
+
         // ----- what each payment method pays -----
         let mut methods: BTreeMap<String, (f64, usize)> = BTreeMap::new();
         for s in self.data.subscriptions.iter().filter(|s| s.is_active() && !s.payment_method.trim().is_empty()) {

@@ -391,6 +391,12 @@ pub struct Data {
     /// Keep running in the system tray when the window is closed.
     #[serde(default)]
     pub keep_in_tray: bool,
+    /// Monthly budgets for single categories, in the main currency.
+    #[serde(default)]
+    pub category_budgets: BTreeMap<String, f64>,
+    /// Categories already told about being over their budget, until they are back under it.
+    #[serde(default)]
+    pub over_budget_categories: Vec<String>,
     /// Folder that receives a copy after every change (empty: no backups).
     #[serde(default)]
     pub backup_dir: String,
@@ -474,6 +480,8 @@ impl Default for Data {
             categories: CATEGORIES.iter().map(|c| c.to_string()).collect(),
             category_colors: BTreeMap::new(),
             keep_in_tray: false,
+            category_budgets: BTreeMap::new(),
+            over_budget_categories: Vec::new(),
             backup_dir: String::new(),
             backup_keep: 30,
             budget: 0.0,
@@ -657,9 +665,15 @@ impl Data {
         }
         if let Some(key) = self.category_colors.keys().find(|k| k.eq_ignore_ascii_case(from)).cloned() {
             if let Some(color) = self.category_colors.remove(&key) {
-                self.category_colors.insert(to, color);
+                self.category_colors.insert(to.clone(), color);
             }
         }
+        if let Some(key) = self.category_budgets.keys().find(|k| k.eq_ignore_ascii_case(from)).cloned() {
+            if let Some(budget) = self.category_budgets.remove(&key) {
+                self.category_budgets.insert(to, budget);
+            }
+        }
+        self.over_budget_categories.retain(|c| !c.eq_ignore_ascii_case(from));
         Ok(())
     }
 
@@ -674,6 +688,28 @@ impl Data {
             s.category = OTHER.to_string();
         }
         self.category_colors.retain(|k, _| !k.eq_ignore_ascii_case(name));
+        self.category_budgets.retain(|k, _| !k.eq_ignore_ascii_case(name));
+        self.over_budget_categories.retain(|c| !c.eq_ignore_ascii_case(name));
+    }
+
+    /// The monthly budget set for a category, if any.
+    pub fn category_budget(&self, name: &str) -> Option<f64> {
+        self.category_budgets.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, b)| *b)
+    }
+
+    /// What the active subscriptions cost per month in each category, in the main currency, the
+    /// dearest first (your share; those that can't be converted are left out).
+    pub fn monthly_by_category(&self) -> Vec<(String, f64)> {
+        let mut by: BTreeMap<String, f64> = BTreeMap::new();
+        for s in self.subscriptions.iter().filter(|s| s.is_active()) {
+            if let Some(v) = self.to_main(s.monthly_cost(), &s.currency) {
+                let category = if s.category.is_empty() { OTHER.to_string() } else { s.category.clone() };
+                *by.entry(category).or_default() += v;
+            }
+        }
+        let mut out: Vec<(String, f64)> = by.into_iter().collect();
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        out
     }
 
     /// The colour the person picked for a category, if they did.
@@ -955,6 +991,28 @@ mod tests {
         let back = Data::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
         assert!(!back.categories().contains(&"Music".to_string()));
         assert!(back.categories().contains(&"Travel".to_string()));
+    }
+
+    #[test]
+    fn category_budgets_follow_their_category() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let spending = d.monthly_by_category();
+        assert!(spending.windows(2).all(|w| w[0].1 >= w[1].1), "dearest first");
+        let by: BTreeMap<String, f64> = spending.into_iter().collect();
+        // The photo suite and the VPN, per month; the dollar one has no rate, the paused one doesn't count.
+        assert!((by["Software"] - (239.88 / 12.0 + 49.99 / 12.0)).abs() < 1e-9);
+        assert!(!by.contains_key("Shopping"));
+
+        d.category_budgets.insert("Software".into(), 30.0);
+        assert_eq!(d.category_budget("software"), Some(30.0));
+        assert_eq!(d.category_budget("Music"), None);
+        d.rename_category("Software", "Apps").unwrap();
+        assert_eq!((d.category_budget("Apps"), d.category_budget("Software")), (Some(30.0), None));
+        d.over_budget_categories.push("Apps".into());
+        d.delete_category("Apps");
+        assert!(d.category_budgets.is_empty() && d.over_budget_categories.is_empty());
     }
 
     #[test]

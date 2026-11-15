@@ -10,6 +10,7 @@ mod model;
 mod paypal;
 mod rates;
 mod reminders;
+mod review;
 mod services;
 mod storage;
 mod theme;

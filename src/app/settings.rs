@@ -277,6 +277,8 @@ impl TrackerApp {
                 }
             });
         });
+        ui.add_space(10.0);
+        ui.label(RichText::new(format!("Subscription Tracker {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(MUTED()));
     }
 
     pub(super) fn currencies_card(&mut self, ui: &mut egui::Ui) {
@@ -539,6 +541,8 @@ enum CategoryAction {
     Commit(String, String),
     CancelRename,
     Delete(String),
+    /// A monthly budget typed for a category (None: cleared).
+    Budget(String, Option<f64>),
 }
 
 impl TrackerApp {
@@ -549,12 +553,13 @@ impl TrackerApp {
             section_title(ui, "Categories");
             ui.add(
                 egui::Label::new(
-                    RichText::new("Group your subscriptions your own way: add, rename or recolour them. Deleting one moves its subscriptions to Other.")
+                    RichText::new("Group your subscriptions your own way: add, rename or recolour them, and give any of them a monthly budget. Deleting one moves its subscriptions to Other.")
                         .color(MUTED()),
                 )
                 .wrap(),
             );
             ui.add_space(4.0);
+            let main = self.data.main_currency.clone();
             for cat in self.data.categories() {
                 let used = self
                     .data
@@ -583,16 +588,28 @@ impl TrackerApp {
                     } else {
                         ui.label(&cat);
                         ui.label(RichText::new(used.to_string()).color(MUTED()).size(12.5));
-                        if !cat.eq_ignore_ascii_case(OTHER) {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if cat.eq_ignore_ascii_case(OTHER) {
+                                ui.add_space(163.0); // where the Rename and Delete buttons are on the other rows
+                            } else {
                                 if ui.button("Delete").clicked() {
                                     action = Some(CategoryAction::Delete(cat.clone()));
                                 }
                                 if ui.button("Rename").clicked() {
                                     action = Some(CategoryAction::StartRename(cat.clone()));
                                 }
-                            });
-                        }
+                            }
+                            ui.label(RichText::new(format!("{main} a month")).size(12.5).color(MUTED()));
+                            let current = self.data.category_budget(&cat);
+                            let text = self.category_budget_texts.entry(cat.clone()).or_insert_with(|| current.map(budget_text).unwrap_or_default());
+                            if ui.add(field(text, "budget", 80.0)).changed() {
+                                if text.trim().is_empty() {
+                                    action = Some(CategoryAction::Budget(cat.clone(), None));
+                                } else if let Some(v) = paypal::parse_amount(text) {
+                                    action = Some(CategoryAction::Budget(cat.clone(), Some(v.abs())));
+                                }
+                            }
+                        });
                     }
                 });
             }
@@ -617,11 +634,19 @@ impl TrackerApp {
                 self.data.category_colors.insert(name, rgb);
                 self.dirty = true;
             }
+            Some(CategoryAction::Budget(name, value)) => {
+                self.data.category_budgets.retain(|k, _| !k.eq_ignore_ascii_case(&name));
+                if let Some(v) = value.filter(|v| *v > 0.0) {
+                    self.data.category_budgets.insert(name, v);
+                }
+                self.dirty = true;
+            }
             Some(CategoryAction::StartRename(name)) => self.renaming = Some((name.clone(), name)),
             Some(CategoryAction::CancelRename) => self.renaming = None,
             Some(CategoryAction::Commit(from, to)) => match self.data.rename_category(&from, &to) {
                 Ok(()) => {
                     self.renaming = None;
+                    self.category_budget_texts.clear();
                     self.dirty = true;
                     self.notify(format!("Renamed to {}", to.trim()));
                 }
@@ -629,6 +654,7 @@ impl TrackerApp {
             },
             Some(CategoryAction::Delete(name)) => {
                 let in_it = self.data.subscriptions.iter().filter(|s| s.category.eq_ignore_ascii_case(&name)).count();
+                self.category_budget_texts.clear();
                 if in_it == 0 {
                     self.data.delete_category(&name);
                     self.dirty = true;
