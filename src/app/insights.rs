@@ -4,24 +4,6 @@
 use super::*;
 use chrono::Months;
 
-/// Every payment of the active subscriptions between two days (inclusive), by date.
-pub(super) fn payments_between(subs: &[Subscription], from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, Subscription)> {
-    let mut out = Vec::new();
-    for s in subs.iter().filter(|s| s.is_active()) {
-        let mut d = s.next_payment;
-        let mut guard = 0;
-        while d <= to && guard < 600 {
-            if d >= from {
-                out.push((d, s.clone()));
-            }
-            d = s.cycle.advance(d, s.billing_day);
-            guard += 1;
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
-    out
-}
-
 pub(super) fn month_start(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap()
 }
@@ -36,6 +18,88 @@ fn add_months(first: NaiveDate, n: i32) -> NaiveDate {
     } else {
         first.checked_sub_months(Months::new((-n) as u32)).unwrap()
     }
+}
+
+/// A bar for each of twelve months, with the budget as a dashed line. `lines` are the
+/// payments a month's tooltip lists. Returns the month that was clicked.
+#[allow(clippy::too_many_arguments)]
+fn month_bars(
+    ui: &mut egui::Ui,
+    id: &str,
+    months: &[NaiveDate],
+    totals: &[f64],
+    budget: f64,
+    main: &str,
+    shown: Option<NaiveDate>,
+    lines: &[(NaiveDate, String)],
+) -> Option<NaiveDate> {
+    let mut picked = None;
+    let h = 210.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let p = ui.painter_at(rect);
+    let top_pad = 22.0;
+    let bottom_pad = 24.0;
+    let chart_h = h - top_pad - bottom_pad;
+    let max = totals.iter().cloned().fold(budget, f64::max).max(1.0);
+    let slot = rect.width() / months.len() as f32;
+    let bar_w = (slot * 0.56).min(46.0);
+    let base_y = rect.bottom() - bottom_pad;
+    p.line_segment([pos2(rect.left(), base_y), pos2(rect.right(), base_y)], Stroke::new(1.0_f32, BORDER()));
+    for (i, (m, v)) in months.iter().zip(totals).enumerate() {
+        let cx = rect.left() + slot * (i as f32 + 0.5);
+        let bh = (chart_h * (*v / max) as f32).max(if *v > 0.0 { 3.0 } else { 0.0 });
+        let bar = Rect::from_min_max(pos2(cx - bar_w / 2.0, base_y - bh), pos2(cx + bar_w / 2.0, base_y));
+        let hit = Rect::from_min_max(pos2(cx - slot / 2.0, rect.top()), pos2(cx + slot / 2.0, rect.bottom()));
+        let resp = ui.interact(hit, ui.id().with((id, i)), Sense::click());
+        let shown = shown == Some(*m);
+        let over = budget > 0.0 && *v > budget + 0.004;
+        let color = if over { RED } else { ACCENT };
+        let fill = if shown || resp.hovered() { color } else { color.gamma_multiply(0.55) };
+        p.rect_filled(bar, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
+        if *v > 0.0 {
+            p.text(
+                pos2(cx, bar.top() - 4.0),
+                Align2::CENTER_BOTTOM,
+                format_money(*v, main).replace(".00", ""),
+                FontId::proportional(11.0),
+                if shown { TEXT() } else { MUTED() },
+            );
+        }
+        p.text(
+            pos2(cx, base_y + 5.0),
+            Align2::CENTER_TOP,
+            m.format("%b").to_string(),
+            FontId::proportional(12.0),
+            if shown { TEXT() } else { MUTED() },
+        );
+        let end = month_end(*m);
+        let in_month: Vec<&(NaiveDate, String)> = lines.iter().filter(|(d, _)| *d >= *m && *d <= end).collect();
+        let resp = resp.on_hover_ui(|ui| {
+            ui.label(RichText::new(m.format("%B %Y").to_string()).strong());
+            if in_month.is_empty() {
+                ui.label(RichText::new("No payments").color(MUTED()));
+            }
+            for (d, text) in in_month.iter().take(12) {
+                ui.label(format!("{} · {text}", d.format("%d %b")));
+            }
+            if in_month.len() > 12 {
+                ui.label(RichText::new(format!("and {} more", in_month.len() - 12)).color(MUTED()));
+            }
+        });
+        if resp.clicked() {
+            picked = Some(*m);
+        }
+    }
+    if budget > 0.0 {
+        let y = base_y - chart_h * (budget / max) as f32;
+        let mut x = rect.left();
+        while x < rect.right() {
+            p.line_segment([pos2(x, y), pos2((x + 6.0).min(rect.right()), y)], Stroke::new(1.5_f32, ORANGE));
+            x += 11.0;
+        }
+        p.text(pos2(rect.right(), y - 3.0), Align2::RIGHT_BOTTOM, "budget", FontId::proportional(11.0), ORANGE);
+    }
+    picked
 }
 
 #[cfg(test)]
@@ -113,71 +177,9 @@ impl TrackerApp {
                     );
                 });
             });
-            let h = 210.0;
-            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-            let p = ui.painter_at(rect);
-            let top_pad = 22.0;
-            let bottom_pad = 24.0;
-            let chart_h = h - top_pad - bottom_pad;
-            let max = totals.iter().cloned().fold(budget, f64::max).max(1.0);
-            let slot = rect.width() / 12.0;
-            let bar_w = (slot * 0.56).min(46.0);
-            let base_y = rect.bottom() - bottom_pad;
-            p.line_segment([pos2(rect.left(), base_y), pos2(rect.right(), base_y)], Stroke::new(1.0_f32, BORDER()));
-            for (i, (m, v)) in months.iter().zip(&totals).enumerate() {
-                let cx = rect.left() + slot * (i as f32 + 0.5);
-                let bh = (chart_h * (*v / max) as f32).max(if *v > 0.0 { 3.0 } else { 0.0 });
-                let bar = Rect::from_min_max(pos2(cx - bar_w / 2.0, base_y - bh), pos2(cx + bar_w / 2.0, base_y));
-                let hit = Rect::from_min_max(pos2(cx - slot / 2.0, rect.top()), pos2(cx + slot / 2.0, rect.bottom()));
-                let resp = ui.interact(hit, ui.id().with(("month_bar", i)), Sense::click());
-                let shown = month_start(self.cal_month) == *m;
-                let over = budget > 0.0 && *v > budget + 0.004;
-                let color = if over { RED } else { ACCENT };
-                let fill = if shown || resp.hovered() { color } else { color.gamma_multiply(0.55) };
-                p.rect_filled(bar, CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
-                if *v > 0.0 {
-                    p.text(
-                        pos2(cx, bar.top() - 4.0),
-                        Align2::CENTER_BOTTOM,
-                        format_money(*v, &main).replace(".00", ""),
-                        FontId::proportional(11.0),
-                        if shown { TEXT() } else { MUTED() },
-                    );
-                }
-                p.text(
-                    pos2(cx, base_y + 5.0),
-                    Align2::CENTER_TOP,
-                    m.format("%b").to_string(),
-                    FontId::proportional(12.0),
-                    if shown { TEXT() } else { MUTED() },
-                );
-                let end = month_end(*m);
-                let in_month: Vec<&(NaiveDate, Subscription)> = pays.iter().filter(|(d, _)| *d >= *m && *d <= end).collect();
-                let resp = resp.on_hover_ui(|ui| {
-                    ui.label(RichText::new(m.format("%B %Y").to_string()).strong());
-                    if in_month.is_empty() {
-                        ui.label(RichText::new("No payments").color(MUTED()));
-                    }
-                    for (d, s) in in_month.iter().take(12) {
-                        ui.label(format!("{} · {} · {}", d.format("%d %b"), s.name, format_money(s.my_amount(), &s.currency)));
-                    }
-                    if in_month.len() > 12 {
-                        ui.label(RichText::new(format!("and {} more", in_month.len() - 12)).color(MUTED()));
-                    }
-                });
-                if resp.clicked() {
-                    picked = Some(*m);
-                }
-            }
-            if budget > 0.0 {
-                let y = base_y - chart_h * (budget / max) as f32;
-                let mut x = rect.left();
-                while x < rect.right() {
-                    p.line_segment([pos2(x, y), pos2((x + 6.0).min(rect.right()), y)], Stroke::new(1.5_f32, ORANGE));
-                    x += 11.0;
-                }
-                p.text(pos2(rect.right(), y - 3.0), Align2::RIGHT_BOTTOM, "budget", FontId::proportional(11.0), ORANGE);
-            }
+            let lines: Vec<(NaiveDate, String)> =
+                pays.iter().map(|(d, s)| (*d, format!("{} · {}", s.name, format_money(s.my_amount(), &s.currency)))).collect();
+            picked = month_bars(ui, "month_bar", &months, &totals, budget, &main, Some(month_start(self.cal_month)), &lines);
             ui.label(
                 RichText::new("Your share, in your main currency, counting from today. Click a month to see it in the calendar.")
                     .size(12.0)
@@ -353,6 +355,107 @@ impl TrackerApp {
                 ui.label(RichText::new(format!("+ {} more · {}", yearly.len() - 10, format_money(rest, &main))).size(12.5).color(MUTED()));
             }
         });
+
+        // ----- what was paid over the last 12 months -----
+        let past_months: Vec<NaiveDate> = (-11..=0).map(|i| add_months(first, i)).collect();
+        let mut past_lines: Vec<(NaiveDate, String)> = Vec::new();
+        let mut past_totals = vec![0.0; past_months.len()];
+        for s in &self.data.subscriptions {
+            for p in s.paid.iter().filter(|p| p.date >= past_months[0]) {
+                past_lines.push((p.date, format!("{} · {}", s.name, format_money(p.amount, &p.currency))));
+                if let (Some(i), Some(v)) = (past_months.iter().rposition(|m| *m <= p.date), self.data.to_main(p.amount, &p.currency)) {
+                    past_totals[i] += v;
+                }
+            }
+        }
+        past_lines.sort();
+        if !past_lines.is_empty() {
+            ui.add_space(12.0);
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    section_title(ui, "Last 12 months");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let total: f64 = past_totals.iter().sum();
+                        ui.label(RichText::new(format!("{} paid", format_money(total, &main))).color(MUTED()));
+                    });
+                });
+                month_bars(ui, "past_bar", &past_months, &past_totals, budget, &main, None, &past_lines);
+                ui.label(
+                    RichText::new("What went out, as far as this list remembers: payments are noted while a subscription is tracked here, or taken from a PayPal import.")
+                        .size(12.0)
+                        .color(MUTED()),
+                );
+            });
+        }
+
+        // ----- price changes over the same months -----
+        let mut changes: Vec<(&PriceChange, &Subscription)> = self
+            .data
+            .subscriptions
+            .iter()
+            .flat_map(|s| s.price_changes.iter().filter(|c| c.date >= past_months[0]).map(move |c| (c, s)))
+            .collect();
+        changes.sort_by_key(|(c, _)| std::cmp::Reverse(c.date));
+        if !changes.is_empty() {
+            ui.add_space(12.0);
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                section_title(ui, "Price changes");
+                for (c, s) in changes.iter().take(8) {
+                    let a_year = (c.to - c.from) / s.shared_by.max(1) as f64 * s.cycle.per_year();
+                    ui.horizontal(|ui| {
+                        let logo = logos_by_id.get(&s.id).cloned().flatten();
+                        avatar(ui, &s.name, 26.0, logo.as_ref());
+                        ui.label(s.name.as_str());
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} to {}",
+                                c.date.format("%d %b %Y"),
+                                format_money(c.from, &c.currency),
+                                format_money(c.to, &c.currency)
+                            ))
+                            .color(MUTED()),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (sign, color) = if a_year > 0.0 { ("+", RED) } else { ("-", GREEN) };
+                            ui.label(RichText::new(format!("{sign}{} a year", format_money(a_year.abs(), &c.currency))).strong().color(color));
+                        });
+                    });
+                }
+                if changes.len() > 8 {
+                    ui.label(RichText::new(format!("+ {} more", changes.len() - 8)).size(12.5).color(MUTED()));
+                }
+            });
+        }
+        // ----- what each payment method pays -----
+        let mut methods: BTreeMap<String, (f64, usize)> = BTreeMap::new();
+        for s in self.data.subscriptions.iter().filter(|s| s.is_active() && !s.payment_method.trim().is_empty()) {
+            if let Some(v) = self.data.to_main(s.monthly_cost(), &s.currency) {
+                let entry = methods.entry(s.payment_method.trim().to_string()).or_default();
+                entry.0 += v;
+                entry.1 += 1;
+            }
+        }
+        if !methods.is_empty() {
+            ui.add_space(12.0);
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                section_title(ui, "What each payment method pays");
+                let mut rows: Vec<(String, (f64, usize))> = methods.into_iter().collect();
+                rows.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+                for (name, (value, count)) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        ui.label(RichText::new(format!("{count} subscription{}", plural(count))).color(MUTED()));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(format!("{} per month", format_money(value, &main))).strong());
+                        });
+                    });
+                }
+                ui.label(RichText::new("Handy when a card expires: these are the subscriptions to update.").size(12.0).color(MUTED()));
+            });
+        }
         if let Some(id) = open_id {
             self.open_editor(Some(id));
         }

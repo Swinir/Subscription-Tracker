@@ -2,6 +2,7 @@
 
 mod app;
 mod backup;
+mod calendar;
 mod logos;
 mod model;
 mod paypal;
@@ -9,6 +10,7 @@ mod rates;
 mod reminders;
 mod storage;
 mod theme;
+mod tray;
 
 use eframe::egui;
 use std::path::PathBuf;

@@ -1,0 +1,68 @@
+name: Release
+
+# Push a tag such as v0.2.0 and the app is built for Windows, macOS and Linux and attached
+# to a GitHub release of that name.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest, file: subscription-tracker-windows.zip }
+          - { name: macOS, os: macos-latest, file: subscription-tracker-macos.tar.gz }
+          - { name: Linux, os: ubuntu-latest, file: subscription-tracker-linux.tar.gz }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the libraries the window and file dialogs need (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/subscription-tracker.exe, README.md -DestinationPath ${{ matrix.file }}
+
+      - name: Pack (macOS and Linux)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.file }} -C target/release subscription-tracker -C ../.. README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: ${{ matrix.file }}
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

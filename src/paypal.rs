@@ -53,10 +53,26 @@ pub struct Candidate {
     pub existing_id: Option<u64>,
     /// Its price in the list, when PayPal now shows a different one.
     pub old_amount: Option<f64>,
+    /// The payments found for it: day and full amount, oldest first.
+    pub paid: Vec<(NaiveDate, f64)>,
+}
+
+/// The columns to read, by position. In a request, `None` means "find it"; in a result,
+/// the ones that were read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Columns {
+    pub date: Option<usize>,
+    /// The shop that was paid.
+    pub name: Option<usize>,
+    pub amount: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ImportResult {
+    /// The columns the payments were read from.
+    pub used: Columns,
+    /// A statement from a bank or card rather than PayPal's own file.
+    pub bank: bool,
     pub rows_read: usize,
     pub payments_out: usize,
     pub candidates: Vec<Candidate>,
@@ -150,6 +166,123 @@ fn find_col_containing(headers: &[String], parts: &[&str]) -> Option<usize> {
         }
     }
     None
+}
+
+fn date_column(headers: &[String]) -> Option<usize> {
+    find_col(headers, &["date", "datum", "fecha", "data", "transaction date", "transaktionsdatum"])
+        .or_else(|| find_col_containing(headers, &["date", "datum", "fecha", "buchungstag", "data operazione", "data contabile"]))
+}
+
+/// PayPal's column for who was paid.
+fn paypal_name_column(headers: &[String]) -> Option<usize> {
+    find_col(headers, &["name", "nom", "nombre", "nome", "naam"])
+        .or_else(|| find_col_containing(headers, &["nom du client", "customer name", "consumer name", "kundenname", "nombre del cliente", "nome del cliente"]))
+}
+
+/// A bank statement's column for who was paid: often a line of text with the shop somewhere in it.
+fn payee_column(headers: &[String]) -> Option<usize> {
+    find_col_containing(headers, &["payee", "merchant", "counterparty", "beneficiary", "empfänger", "begünstigter", "bénéficiaire", "beneficiario", "tegenpartij"])
+        .or_else(|| find_col_containing(headers, &["description", "libell", "beschreibung", "verwendungszweck", "buchungstext", "concepto", "descripción", "descrizione", "omschrijving"]))
+        .or_else(|| find_col_containing(headers, &["details", "narrative", "memo", "reference", "text"]))
+}
+
+/// A column that holds only the money going out, written without a minus sign.
+fn is_paid_out(header: &str) -> bool {
+    ["debit", "débit", "paid out", "money out", "withdraw", "soll", "addebit", "cargo"].iter().any(|w| header.contains(w))
+        && !["credit", "crédit", "haben", " or ", " ou ", " oder "].iter().any(|w| header.contains(w))
+}
+
+/// The amount column, and whether it holds only money going out (see `is_paid_out`).
+fn amount_column(headers: &[String]) -> Option<(usize, bool)> {
+    find_col(headers, &["gross", "brutto", "brut", "bruto", "lordo"])
+        .or_else(|| find_col(headers, &["amount", "betrag", "montant", "importe", "importo", "bedrag", "net", "netto", "neto"]))
+        .or_else(|| find_col_containing(headers, &["montant brut", "gross transaction amount", "gross amount", "bruttobetrag", "importe bruto", "importo lordo"]))
+        .or_else(|| find_col_containing(headers, &["montant net", "net transaction amount", "net amount", "nettobetrag", "importe neto"]))
+        .map(|c| (c, false))
+        .or_else(|| headers.iter().position(|h| is_paid_out(h)).map(|c| (c, true)))
+        .or_else(|| find_col_containing(headers, &["amount", "betrag", "montant", "importe", "importo", "bedrag"]).map(|c| (c, false)))
+}
+
+fn lower_headers(row: &csv::StringRecord) -> Vec<String> {
+    row.iter().map(|h| h.trim().trim_matches('"').trim().to_lowercase()).collect()
+}
+
+/// Every line of the file as fields, and how many lines couldn't be read.
+fn read_records(text: &str) -> Result<(Vec<csv::StringRecord>, usize), String> {
+    let text = text.trim_start_matches('\u{feff}');
+    let header_line = text.lines().find(|l| !l.trim().is_empty()).ok_or("The file is empty.")?;
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(detect_delimiter(header_line))
+        .has_headers(false)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(text.as_bytes());
+    let mut unreadable = 0;
+    let mut all: Vec<csv::StringRecord> = Vec::new();
+    for rec in reader.records() {
+        match rec {
+            Ok(r) => all.push(r),
+            Err(_) => unreadable += 1,
+        }
+    }
+    if all.is_empty() {
+        return Err("The first line of the file couldn't be read.".into());
+    }
+    Ok((all, unreadable))
+}
+
+/// Where the column titles are. Banks put a few lines about the account above them: it's the
+/// first line that names a date and an amount, or else the first of the widest lines.
+fn header_row(all: &[csv::StringRecord]) -> usize {
+    let top = &all[..all.len().min(30)];
+    top.iter()
+        .position(|r| {
+            let h = lower_headers(r);
+            date_column(&h).is_some() && amount_column(&h).is_some()
+        })
+        .or_else(|| {
+            let widest = top.iter().map(|r| r.len()).max()?;
+            top.iter().position(|r| r.len() == widest)
+        })
+        .unwrap_or(0)
+}
+
+/// The file's column titles as written, for choosing columns by hand.
+pub fn column_names(text: &str) -> Vec<String> {
+    let Ok((all, _)) = read_records(text) else { return Vec::new() };
+    let titles: Vec<String> = match read_coded_report(&all) {
+        Some(rep) => rep.headers,
+        None => all[header_row(&all)].iter().map(|h| h.trim().to_string()).collect(),
+    };
+    titles.into_iter().enumerate().map(|(i, t)| if t.is_empty() { format!("Column {}", i + 1) } else { t }).collect()
+}
+
+/// The shop's name out of a bank statement line:
+/// "CARD PAYMENT TO NETFLIX.COM 866-579 ON 03 NOV" becomes "Netflix.com".
+fn clean_payee(text: &str) -> String {
+    const NOISE: [&str; 40] = [
+        "card", "payment", "to", "pos", "purchase", "debit", "direct", "dd", "sepa", "prlv", "cb", "carte", "paiement", "achat",
+        "par", "du", "kartenzahlung", "lastschrift", "visa", "mastercard", "ref", "on", "paypal", "contactless", "online", "www",
+        "the", "at", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    // Reference numbers and dates change from one payment to the next: words with a digit go.
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || matches!(c, '*' | '/' | ',' | ';' | ':'))
+        .filter(|w| w.chars().count() > 1 && !w.chars().any(|c| c.is_ascii_digit()) && !NOISE.contains(&w.to_lowercase().as_str()))
+        .take(3)
+        .collect();
+    if words.is_empty() {
+        return text.trim().to_string();
+    }
+    if words.iter().any(|w| w.chars().any(|c| c.is_lowercase())) {
+        return words.join(" ");
+    }
+    // All capitals, as banks write: "STREAMLY VIDEO" reads better as "Streamly Video".
+    let title = |w: &str| {
+        let mut c = w.chars();
+        c.next().map(|f| f.to_uppercase().chain(c.flat_map(|l| l.to_lowercase())).collect::<String>()).unwrap_or_default()
+    };
+    words.iter().map(|w| title(w)).collect::<Vec<_>>().join(" ")
 }
 
 fn split_date(text: &str) -> Option<(Vec<u32>, bool, bool)> {
@@ -294,30 +427,8 @@ const GET_ACTIVITY: &str = "In PayPal, open Statements (Relevés), choose a cust
      download for at least the last 12 months in CSV format, then open that file here.";
 
 /// Reads the CSV text and lists the subscriptions it contains.
-pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) -> Result<ImportResult, String> {
-    let text = text.trim_start_matches('\u{feff}');
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let header_line = lines.next().ok_or("The file is empty.")?;
-    let delimiter = detect_delimiter(header_line);
-
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(false)
-        .flexible(true)
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
-
-    let mut unreadable = 0;
-    let mut all: Vec<csv::StringRecord> = Vec::new();
-    for rec in reader.records() {
-        match rec {
-            Ok(r) => all.push(r),
-            Err(_) => unreadable += 1,
-        }
-    }
-    if all.is_empty() {
-        return Err("The first line of the file couldn't be read.".into());
-    }
+pub fn analyse(text: &str, order: DateOrder, cols: Columns, today: NaiveDate, existing: &Data) -> Result<ImportResult, String> {
+    let (all, mut unreadable) = read_records(text)?;
 
     let mut warnings = Vec::new();
     let coded = read_coded_report(&all);
@@ -355,15 +466,11 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
             (rep.headers.clone(), rep.rows.clone())
         }
         None => {
-            let headers = all[0].iter().map(|h| h.trim().trim_matches('"').trim().to_lowercase()).collect();
-            (headers, all[1..].to_vec())
+            let h = header_row(&all);
+            (lower_headers(&all[h]), all[h + 1..].to_vec())
         }
     };
 
-    let date_col = find_col(&headers, &["date", "datum", "fecha", "data", "transaction date", "transaktionsdatum"])
-        .or_else(|| find_col_containing(&headers, &["date", "datum", "fecha"]));
-    let name_col = find_col(&headers, &["name", "nom", "nombre", "nome", "naam"])
-        .or_else(|| find_col_containing(&headers, &["nom du client", "customer name", "consumer name", "kundenname", "nombre del cliente", "nome del cliente"]));
     let type_col = find_col(&headers, &["type", "typ", "tipo"])
         .or_else(|| find_col_containing(&headers, &["type d'enregistrement", "record type", "transaction event code", "datensatztyp", "tipo de registro"]))
         .or_else(|| find_col(&headers, &["description", "beschreibung", "descripción", "descrizione", "omschrijving"]));
@@ -371,10 +478,6 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
     let status_col = find_col(&headers, &["status", "état", "etat", "estado", "stato", "statut"]);
     let currency_col = find_col(&headers, &["currency", "währung", "devise", "divisa", "moneda", "valuta"])
         .or_else(|| find_col_containing(&headers, &["devise de la transaction", "transaction currency", "gross transaction currency", "transaktionswährung", "divisa de la transacción"]));
-    let gross_col = find_col(&headers, &["gross", "brutto", "brut", "bruto", "lordo"])
-        .or_else(|| find_col(&headers, &["amount", "betrag", "montant", "importe", "importo", "bedrag", "net", "netto", "neto"]))
-        .or_else(|| find_col_containing(&headers, &["montant brut", "gross transaction amount", "gross amount", "bruttobetrag", "importe bruto", "importo lordo"]))
-        .or_else(|| find_col_containing(&headers, &["montant net", "net transaction amount", "net amount", "nettobetrag", "importe neto"]));
     let debit_credit_col = find_col_containing(&headers, &["débit ou crédit", "debit or credit", "soll oder haben", "débito o crédito"]);
     let to_email_col = find_col_containing(&headers, &["to email", "empfänger", "destinataire", "destinatario"]);
     let from_email_col = find_col_containing(&headers, &["from email", "email de l'expéditeur", "e-mail de l'expéditeur", "absender", "remitente", "mittente"]);
@@ -384,20 +487,44 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
     let title_col = title_col.filter(|c| Some(*c) != type_col);
     let txn_col = find_col_containing(&headers, &["transaction id", "transaktionscode", "numéro de transaction", "id. de transacción", "codice transazione", "transactie", "numéro d'enregistrement", "record id"]);
 
-    let (date_col, gross_col) = match (date_col, gross_col) {
-        (Some(d), Some(g)) => (d, g),
+    // A statement from a bank or card rather than PayPal's own file: none of PayPal's columns.
+    let bank = coded.is_none() && status_col.is_none() && txn_col.is_none() && to_email_col.is_none() && from_email_col.is_none();
+    let date_col = cols.date.or_else(|| date_column(&headers));
+    let name_col = cols.name.or_else(|| paypal_name_column(&headers)).or_else(|| payee_column(&headers).filter(|_| bank));
+    let amount_col = match cols.amount {
+        Some(c) => Some((c, headers.get(c).is_some_and(|h| is_paid_out(h)))),
+        None => amount_column(&headers),
+    };
+    // The column that names the shop isn't also the kind of payment.
+    let type_col = type_col.filter(|c| Some(*c) != name_col);
+    let title_col = title_col.filter(|c| Some(*c) != name_col);
+
+    let (date_col, (gross_col, paid_out)) = match (date_col, amount_col) {
+        (Some(d), Some(a)) => (d, a),
         _ => {
             return Err(format!(
-                "This doesn't look like a PayPal activity file: no date or amount column was found. {GET_ACTIVITY}"
+                "This doesn't look like a PayPal activity file: no date or amount column was found. \
+                 If it's a statement from your bank, choose its columns above. {GET_ACTIVITY}"
             ))
         }
     };
+    let used = Columns { date: Some(date_col), name: name_col, amount: Some(gross_col) };
 
     // Business reports often write amounts in cents without a separator (1299 = 12.99).
     let in_cents = coded.is_some() && {
         let values: Vec<&str> = records.iter().filter_map(|r| r.get(gross_col)).map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
         !values.is_empty() && values.iter().all(|v| v.trim_start_matches('-').chars().all(|c| c.is_ascii_digit()))
     };
+
+    // A card statement lists what was spent as plain amounts: with no minus sign anywhere,
+    // every line is a payment.
+    let unsigned = bank && !paid_out && debit_credit_col.is_none() && {
+        let values: Vec<f64> = records.iter().filter_map(|r| r.get(gross_col)).filter_map(parse_amount).collect();
+        !values.is_empty() && values.iter().all(|v| *v >= 0.0)
+    };
+    if unsigned {
+        warnings.push("No amount in this file has a minus sign, so every line was read as a payment you made.".into());
+    }
 
     struct Row {
         date_parts: (Vec<u32>, bool, bool),
@@ -426,12 +553,19 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
             unreadable += 1;
             continue;
         };
-        let Some(mut amount) = parse_amount(&get(&rec, Some(gross_col))) else {
+        let cell = get(&rec, Some(gross_col));
+        if paid_out && cell.is_empty() {
+            continue; // money received: nothing in the paid-out column on that line
+        }
+        let Some(mut amount) = parse_amount(&cell) else {
             unreadable += 1;
             continue;
         };
         if in_cents {
             amount /= 100.0;
+        }
+        if paid_out || unsigned {
+            amount = -amount.abs();
         }
         let dc = get(&rec, debit_credit_col).to_lowercase();
         if dc.starts_with("dr") || dc.starts_with("déb") || dc.starts_with("deb") || dc == "d" || dc.starts_with("soll") {
@@ -456,6 +590,9 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
         }
         if name.is_empty() {
             continue;
+        }
+        if bank {
+            name = clean_payee(&name);
         }
         let title = get(&rec, title_col).to_lowercase();
         let strong = SUBSCRIPTION_WORDS.iter().any(|w| kind.contains(w) || title.contains(w));
@@ -535,14 +672,16 @@ pub fn analyse(text: &str, order: DateOrder, today: NaiveDate, existing: &Data) 
     if payments_out == 0 {
         warnings.push("No outgoing payments were found in this file.".into());
     }
-    Ok(ImportResult { rows_read, payments_out, candidates, day_first, warnings })
+    Ok(ImportResult { used, bank, rows_read, payments_out, candidates, day_first, warnings })
 }
 
 fn classify(days: i64) -> Option<Cycle> {
     match days {
         5..=10 => Some(Cycle::Weekly),
+        12..=17 => Some(Cycle::Fortnightly),
         24..=38 => Some(Cycle::Monthly),
         80..=100 => Some(Cycle::Quarterly),
+        165..=200 => Some(Cycle::HalfYearly),
         340..=390 => Some(Cycle::Yearly),
         _ => None,
     }
@@ -551,8 +690,10 @@ fn classify(days: i64) -> Option<Cycle> {
 fn cycle_days(c: Cycle) -> i64 {
     match c {
         Cycle::Weekly => 7,
+        Cycle::Fortnightly => 14,
         Cycle::Monthly => 30,
         Cycle::Quarterly => 91,
+        Cycle::HalfYearly => 182,
         Cycle::Yearly => 365,
     }
 }
@@ -630,6 +771,7 @@ fn candidate(name: &str, s: &Series, cycle: Cycle, mut reason: String, confident
         currency: latest.currency.clone(),
         cycle,
         count: s.items.len(),
+        paid: s.items.iter().map(|p| (p.date, p.amount)).collect(),
         first_date: s.first().date,
         last_date: latest.date,
         next_payment: next,
@@ -671,7 +813,7 @@ pub fn find_recurring(payments: &[Payment], today: NaiveDate, existing: &Data) -
                 let new_price_ok = !price_ok
                     && p.hinted
                     && last.hinted
-                    && c != Cycle::Weekly
+                    && !matches!(c, Cycle::Weekly | Cycle::Fortnightly)
                     && same_billing_day(last.date, p.date)
                     && (0.4..=2.5).contains(&ratio);
                 if !price_ok && !new_price_ok {
@@ -750,7 +892,7 @@ pub fn find_recurring(payments: &[Payment], today: NaiveDate, existing: &Data) -
             let strong = s.items.iter().any(|p| p.strong);
             let cycle = s.cycle.unwrap();
             // Two equal payments a month apart can be chance unless PayPal pays them automatically.
-            if n < 3 && (!hinted || cycle == Cycle::Weekly) {
+            if n < 3 && (!hinted || matches!(cycle, Cycle::Weekly | Cycle::Fortnightly)) {
                 continue;
             }
             // A subscription keeps its price most of the time: allow one change per 4 payments.
@@ -865,7 +1007,7 @@ mod tests {
     fn example_file_finds_subscriptions() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
         let data = Data::default();
-        let r = analyse(&example_csv(today), DateOrder::Auto, today, &data).unwrap();
+        let r = analyse(&example_csv(today), DateOrder::Auto, Columns::default(), today, &data).unwrap();
         assert!(r.day_first);
         let names: Vec<&str> = r.candidates.iter().filter(|c| c.selected).map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"Streamly Video"), "{names:?}");
@@ -888,10 +1030,93 @@ mod tests {
         \"RD\",\"Identifiant de compte marchand\",\"Numéro d'enregistrement\",\"Numéro de l'enregistrement associé\",\"Numéro de facture\",\"Date et heure de création\",\"Type d'enregistrement\",\"Sous-type d'enregistrement\",\"Devise de la transaction\",\"Montant brut de la transaction\",\"Nom du client\",\"Description\"\n";
 
     #[test]
+    fn bank_statement_with_paid_out_column() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        // Lines about the account above the table, money out and in in columns of their own,
+        // and the shop somewhere in the card text, with a reference that changes every month.
+        let mut csv = String::from("Account;GB00 1234\nDownloaded;10/11/2026\n\nDate;Type;Description;Paid out;Paid in;Balance\n");
+        let months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT"];
+        let shop_days = [4, 19, 9, 27, 13, 2, 22, 7, 16, 11];
+        for m in 1..=10 {
+            csv.push_str(&format!("03/{m:02}/2026;DEB;CARD PAYMENT TO STREAMLY VIDEO 88{m}123 ON 02 {};12,99;;1.000,00\n", months[m - 1]));
+            csv.push_str(&format!("25/{m:02}/2026;CR;ACME LTD SALARY;;2.100,00;3.100,00\n"));
+            csv.push_str(&format!("{:02}/{m:02}/2026;DEB;CORNER SHOP {m}7;{},40;;900,00\n", shop_days[m - 1], 3 + m));
+        }
+        assert_eq!(column_names(&csv), ["Date", "Type", "Description", "Paid out", "Paid in", "Balance"]);
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
+        assert!(r.bank);
+        assert_eq!(r.used, Columns { date: Some(0), name: Some(2), amount: Some(3) });
+        assert_eq!((r.rows_read, r.payments_out), (30, 20));
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let names: Vec<&str> = r.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Streamly Video"], "{:?}", r.candidates);
+        let video = &r.candidates[0];
+        assert_eq!((video.cycle, video.paid.len(), video.selected), (Cycle::Monthly, 10, true));
+        assert!((video.amount - 12.99).abs() < 0.001);
+    }
+
+    #[test]
+    fn fortnightly_and_half_yearly_payments() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut csv = String::from("Date,Description,Amount\n");
+        let mut day = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        while day < today {
+            csv.push_str(&format!("{},VEG BOX CO,-18.00\n", day.format("%Y-%m-%d")));
+            day += Duration::days(14);
+        }
+        for d in ["2025-05-02", "2025-11-02", "2026-05-02", "2026-11-02"] {
+            csv.push_str(&format!("{d},CAR INSURANCE LTD,-210.00\n"));
+        }
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
+        let cycle = |name: &str| r.candidates.iter().find(|c| c.name == name).map(|c| c.cycle);
+        assert_eq!(cycle("Veg Box Co"), Some(Cycle::Fortnightly), "{:?}", r.candidates);
+        assert_eq!(cycle("Car Insurance Ltd"), Some(Cycle::HalfYearly), "{:?}", r.candidates);
+    }
+
+    #[test]
+    fn card_statement_without_minus_signs() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut csv = String::from("Date,Description,Amount\n");
+        for m in 5..=10 {
+            csv.push_str(&format!("2026-{m:02}-05,PAYPAL *MUSICBOX 4029357733,9.99\n"));
+        }
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
+        assert!(r.warnings.iter().any(|w| w.contains("minus sign")), "{:?}", r.warnings);
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!((r.candidates[0].name.as_str(), r.candidates[0].cycle), ("Musicbox", Cycle::Monthly));
+    }
+
+    #[test]
+    fn columns_chosen_by_hand() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut csv = String::from("When;Whom;How much\n");
+        for m in 5..=10 {
+            csv.push_str(&format!("2026-{m:02}-05;Musicbox;-9.99\n"));
+        }
+        let err = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap_err();
+        assert!(err.contains("choose its columns"), "{err}");
+        assert_eq!(column_names(&csv), ["When", "Whom", "How much"]);
+        let cols = Columns { date: Some(0), name: Some(1), amount: Some(2) };
+        let r = analyse(&csv, DateOrder::Auto, cols, today, &Data::default()).unwrap();
+        assert_eq!(r.used, cols);
+        assert_eq!(r.candidates.len(), 1);
+        assert_eq!(r.candidates[0].name, "Musicbox");
+    }
+
+    #[test]
+    fn shop_names_in_bank_text() {
+        assert_eq!(clean_payee("CARD PAYMENT TO NETFLIX.COM 866-579 ON 03 NOV"), "Netflix.com");
+        assert_eq!(clean_payee("PAYPAL *SPOTIFY P1A2B3"), "Spotify");
+        assert_eq!(clean_payee("Prlv SEPA Salle de Sport Lyon 2026"), "Salle de Sport");
+        // Nothing left to go by: the text as it is.
+        assert_eq!(clean_payee(" 12345 "), "12345");
+    }
+
+    #[test]
     fn empty_reconciliation_report_explains_itself() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
         let csv = format!("{RECON_HEAD}\"RF\",\"Numéro de dossier\",\"Total d'enregistrements\",\"Total de fichiers\"\n\"RF\",\"1\",\"0\",\"1\"\n");
-        let err = analyse(&csv, DateOrder::Auto, today, &Data::default()).unwrap_err();
+        let err = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap_err();
         assert!(err.contains("balance reconciliation"), "{err}");
         assert!(err.contains("01 Jul 2026"), "{err}");
         assert!(err.contains("no transactions"), "{err}");
@@ -908,7 +1133,7 @@ mod tests {
             ));
         }
         csv.push_str("\"RF\",\"Numéro de dossier\",\"Total d'enregistrements\",\"Total de fichiers\"\n\"RF\",\"1\",\"3\",\"1\"\n");
-        let r = analyse(&csv, DateOrder::Auto, today, &Data::default()).unwrap();
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
         assert_eq!(r.payments_out, 3);
         assert_eq!(r.candidates.len(), 1);
         assert_eq!(r.candidates[0].name, "Streamly Video");
@@ -946,7 +1171,7 @@ mod tests {
         row("26/11/2025", pre, "Mail Service", "-155,48");
         row("22/11/2025", "Conversion de devise standard", "", "-4,36");
 
-        let r = analyse(&csv, DateOrder::Auto, today, &Data::default()).unwrap();
+        let r = analyse(&csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
         let ticked: Vec<&str> = r.candidates.iter().filter(|c| c.selected).map(|c| c.name.as_str()).collect();
         assert_eq!(ticked, vec!["Game Store", "Office Suite"], "{:?}", r.candidates);
         assert!(r.candidates.iter().all(|c| c.website.is_none()), "no addresses in this file");
@@ -982,12 +1207,21 @@ mod tests {
             website: String::new(),
             trial_until: None,
             shared_by: 1,
+            started_on: None,
+            cancelled_on: None,
+            paid: Vec::new(),
+            price_changes: Vec::new(),
+            notice_days: 0,
+            usage: None,
+            manage_url: String::new(),
+            payment_method: String::new(),
+            tags: Vec::new(),
         });
         let csv = "Datum;Uhrzeit;Name;Typ;Status;Währung;Brutto\n\
                    01.09.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\
                    01.10.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\
                    01.11.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n";
-        let r = analyse(csv, DateOrder::Auto, today, &data).unwrap();
+        let r = analyse(csv, DateOrder::Auto, Columns::default(), today, &data).unwrap();
         let c = &r.candidates[0];
         assert!(c.already_tracked && c.selected, "ticked so it gets updated");
         assert_eq!(c.existing_id, Some(data.subscriptions[0].id));
@@ -996,7 +1230,7 @@ mod tests {
 
         // Same price: listed but not ticked.
         data.subscriptions[0].amount = 9.99;
-        let r = analyse(csv, DateOrder::Auto, today, &data).unwrap();
+        let r = analyse(csv, DateOrder::Auto, Columns::default(), today, &data).unwrap();
         assert!(!r.candidates[0].selected);
         assert_eq!(r.candidates[0].old_amount, None);
     }
@@ -1008,7 +1242,7 @@ mod tests {
         let path = std::env::var("PAYPAL_CSV").expect("set PAYPAL_CSV");
         let text = decode_bytes(&std::fs::read(path).unwrap());
         let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
-        match analyse(&text, DateOrder::Auto, today, &Data::default()) {
+        match analyse(&text, DateOrder::Auto, Columns::default(), today, &Data::default()) {
             Err(e) => println!("ERROR: {e}"),
             Ok(r) => {
                 println!("rows {} payments {} day_first {}", r.rows_read, r.payments_out, r.day_first);
@@ -1033,7 +1267,7 @@ mod tests {
                    01.09.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\
                    01.10.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\
                    01.11.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n";
-        let r = analyse(csv, DateOrder::Auto, today, &Data::default()).unwrap();
+        let r = analyse(csv, DateOrder::Auto, Columns::default(), today, &Data::default()).unwrap();
         assert_eq!(r.candidates.len(), 1);
         assert_eq!(r.candidates[0].cycle, Cycle::Monthly);
         assert!((r.candidates[0].amount - 9.99).abs() < 0.001);

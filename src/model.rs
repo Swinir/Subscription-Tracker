@@ -7,19 +7,24 @@ use std::collections::BTreeMap;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Cycle {
     Weekly,
+    Fortnightly,
     Monthly,
     Quarterly,
+    HalfYearly,
     Yearly,
 }
 
 impl Cycle {
-    pub const ALL: [Cycle; 4] = [Cycle::Weekly, Cycle::Monthly, Cycle::Quarterly, Cycle::Yearly];
+    pub const ALL: [Cycle; 6] =
+        [Cycle::Weekly, Cycle::Fortnightly, Cycle::Monthly, Cycle::Quarterly, Cycle::HalfYearly, Cycle::Yearly];
 
     pub fn label(self) -> &'static str {
         match self {
             Cycle::Weekly => "Weekly",
+            Cycle::Fortnightly => "Every 2 weeks",
             Cycle::Monthly => "Monthly",
             Cycle::Quarterly => "Every 3 months",
+            Cycle::HalfYearly => "Every 6 months",
             Cycle::Yearly => "Yearly",
         }
     }
@@ -27,8 +32,10 @@ impl Cycle {
     pub fn per(self) -> &'static str {
         match self {
             Cycle::Weekly => "week",
+            Cycle::Fortnightly => "2 weeks",
             Cycle::Monthly => "month",
             Cycle::Quarterly => "3 months",
+            Cycle::HalfYearly => "6 months",
             Cycle::Yearly => "year",
         }
     }
@@ -36,8 +43,10 @@ impl Cycle {
     pub fn per_year(self) -> f64 {
         match self {
             Cycle::Weekly => 52.0,
+            Cycle::Fortnightly => 26.0,
             Cycle::Monthly => 12.0,
             Cycle::Quarterly => 4.0,
+            Cycle::HalfYearly => 2.0,
             Cycle::Yearly => 1.0,
         }
     }
@@ -47,8 +56,10 @@ impl Cycle {
     pub fn advance(self, d: NaiveDate, anchor_day: u32) -> NaiveDate {
         match self {
             Cycle::Weekly => d + Duration::days(7),
+            Cycle::Fortnightly => d + Duration::days(14),
             Cycle::Monthly => add_months(d, 1, anchor_day),
             Cycle::Quarterly => add_months(d, 3, anchor_day),
+            Cycle::HalfYearly => add_months(d, 6, anchor_day),
             Cycle::Yearly => add_months(d, 12, anchor_day),
         }
     }
@@ -90,10 +101,31 @@ impl Status {
     }
 }
 
+/// How much the person uses a subscription, as they say.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Usage {
+    Often,
+    Sometimes,
+    Rarely,
+}
+
+impl Usage {
+    pub const ALL: [Usage; 3] = [Usage::Often, Usage::Sometimes, Usage::Rarely];
+    pub fn label(self) -> &'static str {
+        match self {
+            Usage::Often => "Often",
+            Usage::Sometimes => "Sometimes",
+            Usage::Rarely => "Rarely or never",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
     Manual,
     PayPal,
+    /// Found in a bank or card statement.
+    Bank,
 }
 
 impl Source {
@@ -101,6 +133,7 @@ impl Source {
         match self {
             Source::Manual => "Manual",
             Source::PayPal => "PayPal",
+            Source::Bank => "Bank statement",
         }
     }
 }
@@ -130,6 +163,50 @@ pub struct Subscription {
     /// How many people share the cost (you included); totals count your share.
     #[serde(default = "one_person")]
     pub shared_by: u32,
+    /// The day you signed up, when known.
+    #[serde(default)]
+    pub started_on: Option<NaiveDate>,
+    /// The day it was marked cancelled.
+    #[serde(default)]
+    pub cancelled_on: Option<NaiveDate>,
+    /// The payments that have gone out, oldest first, one per day.
+    #[serde(default)]
+    pub paid: Vec<Paid>,
+    /// The price changes, oldest first.
+    #[serde(default)]
+    pub price_changes: Vec<PriceChange>,
+    /// How many days before a renewal it must be cancelled (0: any time).
+    #[serde(default)]
+    pub notice_days: u32,
+    /// How much you use it (None: not said).
+    #[serde(default)]
+    pub usage: Option<Usage>,
+    /// The page where you manage or cancel it (an https address, or empty).
+    #[serde(default)]
+    pub manage_url: String,
+    /// What pays for it, as the person writes it: "Visa ending 4242".
+    #[serde(default)]
+    pub payment_method: String,
+    /// Words to find it by.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// A payment that went out: what you paid (your share) and when.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Paid {
+    pub date: NaiveDate,
+    pub amount: f64,
+    pub currency: String,
+}
+
+/// The full price went from one amount to another on this day.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PriceChange {
+    pub date: NaiveDate,
+    pub from: f64,
+    pub to: f64,
+    pub currency: String,
 }
 
 fn one_person() -> u32 {
@@ -163,11 +240,84 @@ impl Subscription {
         self.status == Status::Active
     }
 
-    /// Moves the next payment date forward until it is today or later.
+    /// Notes a payment that went out, keeping the log in date order with one entry per day.
+    pub fn record_paid(&mut self, date: NaiveDate, amount: f64, currency: &str) {
+        if let Err(i) = self.paid.binary_search_by_key(&date, |p| p.date) {
+            self.paid.insert(i, Paid { date, amount, currency: currency.to_uppercase() });
+        }
+    }
+
+    /// Changes the price, remembering the old one.
+    pub fn set_price(&mut self, amount: f64, date: NaiveDate) {
+        if (self.amount - amount).abs() > 0.004 {
+            self.price_changes.push(PriceChange { date, from: self.amount, to: amount, currency: self.currency.clone() });
+            self.price_changes.sort_by_key(|c| c.date);
+            self.amount = amount;
+        }
+    }
+
+    /// Takes the values of the edit form, keeping what the form doesn't show
+    /// (the payment log) and noting a price change or a cancellation.
+    pub fn apply_edit(&mut self, mut edited: Subscription, today: NaiveDate) {
+        edited.id = self.id;
+        edited.paid = std::mem::take(&mut self.paid);
+        edited.price_changes = std::mem::take(&mut self.price_changes);
+        edited.cancelled_on = match edited.status {
+            Status::Cancelled => self.cancelled_on.or(Some(today)),
+            _ => None,
+        };
+        // A new billing cycle or currency makes the two prices incomparable: no change is noted.
+        if edited.cycle == self.cycle && edited.currency.eq_ignore_ascii_case(&self.currency) {
+            let new_price = std::mem::replace(&mut edited.amount, self.amount);
+            edited.set_price(new_price, today);
+        }
+        *self = edited;
+    }
+
+    /// The nearest last day to cancel that hasn't passed (today counts), and the payment
+    /// cancelling by then avoids. None when it can be cancelled any time, or isn't running.
+    pub fn cancel_by(&self, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+        if self.notice_days == 0 || !self.is_active() {
+            return None;
+        }
+        // With a long notice the day for the next payment may be gone: look at the ones after.
+        let mut payment = self.next_payment;
+        for _ in 0..60 {
+            let by = payment - Duration::days(self.notice_days as i64);
+            if by >= today {
+                return Some((by, payment));
+            }
+            payment = self.cycle.advance(payment, self.billing_day);
+        }
+        None
+    }
+
+    /// Everything paid so far, per currency.
+    pub fn paid_totals(&self) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for p in &self.paid {
+            *out.entry(p.currency.clone()).or_default() += p.amount;
+        }
+        out
+    }
+
+    /// Roughly what cancelling has saved so far (your share, in its own currency).
+    pub fn saved_since_cancelling(&self, today: NaiveDate) -> Option<f64> {
+        let since = self.cancelled_on.filter(|_| self.status == Status::Cancelled)?;
+        let days = (today - since).num_days().max(0) as f64;
+        Some(self.yearly_cost() * days / 365.25)
+    }
+
+    /// Moves the next payment date forward until it is today or later. The dates
+    /// passed on the way are payments that went out (when the subscription is active).
     pub fn roll_forward(&mut self, today: NaiveDate) -> bool {
         let mut changed = false;
         let mut guard = 0;
         while self.next_payment < today && guard < 2000 {
+            if self.is_active() {
+                let currency = self.currency.clone();
+                self.record_paid(self.next_payment, self.my_amount(), &currency);
+            }
             self.next_payment = self.cycle.advance(self.next_payment, self.billing_day);
             changed = true;
             guard += 1;
@@ -176,8 +326,23 @@ impl Subscription {
     }
 }
 
+/// The layout of the saved file. Raise it, and convert in `Data::from_json`, when a change
+/// can't be read back through field defaults.
+pub const DATA_VERSION: u32 = 2;
+
+/// Why a file couldn't be read as a list.
+#[derive(Debug, PartialEq)]
+pub enum ReadError {
+    NotAList,
+    /// Saved by a newer version of the app: reading it here would drop what this version doesn't know.
+    Newer,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Data {
+    /// The file layout this was saved with (0: before layouts were numbered).
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
     #[serde(default = "one")]
@@ -196,6 +361,21 @@ pub struct Data {
     /// Payments already reminded about (subscription id, payment date).
     #[serde(default)]
     pub reminded: Vec<(u64, NaiveDate)>,
+    /// Last days to cancel already reminded about (subscription id, that day).
+    #[serde(default)]
+    pub reminded_cancel: Vec<(u64, NaiveDate)>,
+    /// The person was told about being over budget, and the total hasn't dropped under it since.
+    #[serde(default)]
+    pub over_budget_notified: bool,
+    /// The categories to choose from, in the person's order ("Other" always exists).
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Colours the person picked for categories (the others get one from their name).
+    #[serde(default)]
+    pub category_colors: BTreeMap<String, [u8; 3]>,
+    /// Keep running in the system tray when the window is closed.
+    #[serde(default)]
+    pub keep_in_tray: bool,
     /// Folder that receives a copy after every change (empty: no backups).
     #[serde(default)]
     pub backup_dir: String,
@@ -265,6 +445,7 @@ fn default_currency() -> String {
 impl Default for Data {
     fn default() -> Self {
         Data {
+            version: DATA_VERSION,
             subscriptions: Vec::new(),
             next_id: 1,
             main_currency: default_currency(),
@@ -272,6 +453,11 @@ impl Default for Data {
             reminders: true,
             remind_days: 3,
             reminded: Vec::new(),
+            reminded_cancel: Vec::new(),
+            over_budget_notified: false,
+            categories: CATEGORIES.iter().map(|c| c.to_string()).collect(),
+            category_colors: BTreeMap::new(),
+            keep_in_tray: false,
             backup_dir: String::new(),
             backup_keep: 30,
             budget: 0.0,
@@ -285,6 +471,21 @@ impl Default for Data {
 }
 
 impl Data {
+    /// Reads a saved list, bringing an older layout up to date.
+    pub fn from_json(text: &str) -> Result<Data, ReadError> {
+        let mut d: Data = serde_json::from_str(text).map_err(|_| ReadError::NotAList)?;
+        if d.version > DATA_VERSION {
+            return Err(ReadError::Newer);
+        }
+        // Layouts 0 and 1 have no list of categories: they had the built-in ones. Everything
+        // else that came later has a default.
+        if d.version < 2 {
+            d.categories = CATEGORIES.iter().map(|c| c.to_string()).collect();
+        }
+        d.version = DATA_VERSION;
+        Ok(d)
+    }
+
     pub fn add(&mut self, mut s: Subscription) -> u64 {
         let used_max = self.subscriptions.iter().map(|s| s.id).max().unwrap_or(0);
         self.next_id = self.next_id.max(used_max + 1);
@@ -297,10 +498,6 @@ impl Data {
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Subscription> {
         self.subscriptions.iter_mut().find(|s| s.id == id)
-    }
-
-    pub fn remove(&mut self, id: u64) {
-        self.subscriptions.retain(|s| s.id != id);
     }
 
     pub fn roll_all_forward(&mut self, today: NaiveDate) -> bool {
@@ -378,14 +575,82 @@ impl Data {
         self.subscriptions.iter().find(|s| normalize_name(&s.name) == n)
     }
 
+    /// The categories to choose from: the person's own list, then any a subscription uses that
+    /// isn't in it (from an import or a backup), and always "Other".
     pub fn categories(&self) -> Vec<String> {
-        let mut out: Vec<String> = CATEGORIES.iter().map(|c| c.to_string()).collect();
+        let mut out: Vec<String> = self.categories.clone();
         for s in &self.subscriptions {
             if !s.category.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(&s.category)) {
                 out.push(s.category.clone());
             }
         }
+        if !out.iter().any(|c| c.eq_ignore_ascii_case(OTHER)) {
+            out.push(OTHER.to_string());
+        }
         out
+    }
+
+    /// A name for a category that is free to use: trimmed, not empty, not too long, not taken
+    /// (`renaming` is the one being renamed, whose own name may be reused).
+    fn free_category_name(&self, name: &str, renaming: Option<&str>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Please give the category a name.".into());
+        }
+        if name.chars().count() > 30 {
+            return Err("Please keep the name to 30 letters.".into());
+        }
+        let taken = self.categories().iter().any(|c| c.eq_ignore_ascii_case(name) && !renaming.is_some_and(|r| r.eq_ignore_ascii_case(c)));
+        if taken {
+            return Err(format!("There is already a category called {name}."));
+        }
+        Ok(name.to_string())
+    }
+
+    pub fn add_category(&mut self, name: &str) -> Result<(), String> {
+        let name = self.free_category_name(name, None)?;
+        self.categories = self.categories();
+        self.categories.push(name);
+        Ok(())
+    }
+
+    /// Renames a category, in the list and on every subscription in it; its colour goes along.
+    pub fn rename_category(&mut self, from: &str, to: &str) -> Result<(), String> {
+        if from.eq_ignore_ascii_case(OTHER) {
+            return Err("\"Other\" is where the rest goes, so it keeps its name.".into());
+        }
+        let to = self.free_category_name(to, Some(from))?;
+        self.categories = self.categories();
+        for c in self.categories.iter_mut().filter(|c| c.eq_ignore_ascii_case(from)) {
+            *c = to.clone();
+        }
+        for s in self.subscriptions.iter_mut().filter(|s| s.category.eq_ignore_ascii_case(from)) {
+            s.category = to.clone();
+        }
+        if let Some(key) = self.category_colors.keys().find(|k| k.eq_ignore_ascii_case(from)).cloned() {
+            if let Some(color) = self.category_colors.remove(&key) {
+                self.category_colors.insert(to, color);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a category; what was in it moves to "Other".
+    pub fn delete_category(&mut self, name: &str) {
+        if name.eq_ignore_ascii_case(OTHER) {
+            return;
+        }
+        self.categories = self.categories();
+        self.categories.retain(|c| !c.eq_ignore_ascii_case(name));
+        for s in self.subscriptions.iter_mut().filter(|s| s.category.eq_ignore_ascii_case(name)) {
+            s.category = OTHER.to_string();
+        }
+        self.category_colors.retain(|k, _| !k.eq_ignore_ascii_case(name));
+    }
+
+    /// The colour the person picked for a category, if they did.
+    pub fn category_color(&self, name: &str) -> Option<[u8; 3]> {
+        self.category_colors.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, c)| *c)
     }
 
     pub fn has_name(&self, name: &str) -> bool {
@@ -413,7 +678,7 @@ impl Data {
             // Show the options too: one shared plan and one free trial.
             let shared_by = if name == "Video streaming" { 2 } else { 1 };
             let trial_until = if name == "Language course app" { Some(date) } else { None };
-            self.add(Subscription {
+            let mut s = Subscription {
                 trial_until,
                 shared_by,
                 id: 0,
@@ -428,10 +693,58 @@ impl Data {
                 source,
                 notes: "Example".to_string(),
                 website: String::new(),
-            });
+                started_on: None,
+                cancelled_on: None,
+                paid: Vec::new(),
+                price_changes: Vec::new(),
+                // One that needs a week's notice, so its last day to cancel shows.
+                notice_days: if name == "Gym membership" { 7 } else { 0 },
+                // And what they say about using them, so the review shows.
+                usage: match name {
+                    "Gym membership" => Some(Usage::Rarely),
+                    "Music service" | "Code assistant" => Some(Usage::Often),
+                    _ => None,
+                },
+                manage_url: if name == "Gym membership" { "https://example.com/membership".to_string() } else { String::new() },
+                payment_method: match name {
+                    "Video streaming" | "Music service" | "Game pass" => "Visa ending 4242",
+                    "Gym membership" => "Bank transfer",
+                    "Cloud storage 2 TB" | "VPN" => "PayPal",
+                    _ => "",
+                }
+                .to_string(),
+                tags: match name {
+                    "Video streaming" => vec!["family".to_string()],
+                    "Gym membership" | "Meal kit box" => vec!["health".to_string()],
+                    _ => Vec::new(),
+                },
+            };
+            // A year of past payments (none for the one still in its free trial): rolling
+            // forward from a year back logs them and lands on the same next payment.
+            if s.trial_until.is_none() {
+                let start = match cycle {
+                    Cycle::Weekly => date - Duration::days(7 * 52),
+                    _ => date.checked_sub_months(Months::new(12)).unwrap_or(date),
+                };
+                s.started_on = Some(start);
+                s.next_payment = start;
+                s.roll_forward(today);
+            }
+            // And one price rise, four months ago.
+            if name == "Video streaming" {
+                let rise = today - Duration::days(120);
+                s.price_changes.push(PriceChange { date: rise, from: 11.99, to: amount, currency: cur.to_string() });
+                for p in s.paid.iter_mut().filter(|p| p.date < rise) {
+                    p.amount = 11.99 / shared_by as f64;
+                }
+            }
+            self.add(s);
         }
     }
 }
+
+/// The category everything else goes in; it can't be renamed or removed.
+pub const OTHER: &str = "Other";
 
 pub const CATEGORIES: [&str; 11] = [
     "Streaming",
@@ -450,6 +763,31 @@ pub const CATEGORIES: [&str; 11] = [
 pub const CURRENCIES: [&str; 14] = [
     "EUR", "USD", "GBP", "CHF", "CAD", "AUD", "JPY", "PLN", "SEK", "NOK", "DKK", "CZK", "HUF", "BRL",
 ];
+
+/// Words to find a subscription by, from what the person typed: separated by commas,
+/// without empty ones or repeats, at most eight.
+pub fn parse_tags(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in text.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        if out.len() < 8 && !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// A web address the person typed, made ready to open: `example.com/account` becomes
+/// `https://example.com/account`. Only http and https addresses with a real host are accepted.
+pub fn clean_url(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    let full = if lower.starts_with("http://") || lower.starts_with("https://") { t.to_string() } else { format!("https://{t}") };
+    let host = full.split("://").nth(1)?.split(['/', '?', '#']).next()?;
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.')).then_some(full)
+}
 
 pub fn normalize_name(name: &str) -> String {
     name.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
@@ -528,9 +866,76 @@ pub fn parse_user_date(text: &str) -> Option<NaiveDate> {
     None
 }
 
+/// Every payment of the active subscriptions between two days (inclusive), by date.
+pub fn payments_between(subs: &[Subscription], from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, Subscription)> {
+    let mut out = Vec::new();
+    for s in subs.iter().filter(|s| s.is_active()) {
+        let mut d = s.next_payment;
+        let mut guard = 0;
+        while d <= to && guard < 600 {
+            if d >= from {
+                out.push((d, s.clone()));
+            }
+            d = s.cycle.advance(d, s.billing_day);
+            guard += 1;
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_categories() {
+        // A file from before the list existed gets the built-in categories.
+        let old = r#"{"subscriptions":[{"id":1,"name":"News","amount":5.0,"currency":"EUR","cycle":"Monthly",
+            "next_payment":"2026-12-01","status":"Active","source":"Manual","category":"Pets"}],"next_id":2}"#;
+        let mut d = Data::from_json(old).unwrap();
+        assert!(d.categories.contains(&"Streaming".to_string()));
+        // One a subscription uses is offered too, and "Other" always is.
+        assert!(d.categories().contains(&"Pets".to_string()) && d.categories().contains(&"Other".to_string()));
+
+        assert!(d.add_category("  Travel ").is_ok());
+        assert!(d.add_category("travel").unwrap_err().contains("already"));
+        assert!(d.add_category("   ").is_err());
+        assert!(d.add_category(&"x".repeat(31)).is_err());
+
+        d.category_colors.insert("Pets".into(), [1, 2, 3]);
+        d.rename_category("pets", "Animals").unwrap();
+        assert_eq!(d.subscriptions[0].category, "Animals");
+        assert_eq!(d.category_color("animals"), Some([1, 2, 3]));
+        assert!(d.categories().contains(&"Animals".to_string()) && !d.categories().contains(&"Pets".to_string()));
+        // Changing only the capitals of its own name is fine; taking another's name is not.
+        assert!(d.rename_category("Animals", "ANIMALS").is_ok());
+        assert!(d.rename_category("Animals", "Music").is_err());
+        assert!(d.rename_category("Other", "Misc").is_err());
+
+        d.delete_category("Animals");
+        assert_eq!(d.subscriptions[0].category, "Other");
+        assert_eq!(d.category_color("Animals"), None);
+        d.delete_category("Other");
+        assert!(d.categories().contains(&"Other".to_string()));
+
+        // What is saved reads back as it was, with no built-in ones put back.
+        d.delete_category("Music");
+        let back = Data::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(!back.categories().contains(&"Music".to_string()));
+        assert!(back.categories().contains(&"Travel".to_string()));
+    }
+
+    #[test]
+    fn tags_and_addresses() {
+        assert_eq!(parse_tags(" family, Work ,, family,"), ["family", "Work"]);
+        assert_eq!(parse_tags("a,b,c,d,e,f,g,h,i,j").len(), 8);
+        assert_eq!(clean_url("example.com/account").as_deref(), Some("https://example.com/account"));
+        assert_eq!(clean_url(" http://example.com ").as_deref(), Some("http://example.com"));
+        for bad in ["", "javascript:alert(1)", "file:///c:/x", "example", "https://", "has space.com", "ftp://example.com"] {
+            assert_eq!(clean_url(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn monthly_keeps_anchor_day() {
@@ -539,6 +944,19 @@ mod tests {
         assert_eq!(feb, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap());
         let mar = Cycle::Monthly.advance(feb, 31);
         assert_eq!(mar, NaiveDate::from_ymd_opt(2026, 3, 31).unwrap());
+    }
+
+    #[test]
+    fn the_cycles_in_between() {
+        let d = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        assert_eq!(Cycle::Fortnightly.advance(d, 31), NaiveDate::from_ymd_opt(2026, 9, 14).unwrap());
+        // Six months on from 31 August is the end of February.
+        assert_eq!(Cycle::HalfYearly.advance(d, 31), NaiveDate::from_ymd_opt(2027, 2, 28).unwrap());
+        // Every cycle comes to the same yearly cost for the same money per year.
+        for c in Cycle::ALL {
+            assert!((c.per_year() * (120.0 / c.per_year()) - 120.0).abs() < 1e-9);
+            assert!(c.advance(d, 31) > d);
+        }
     }
 
     #[test]
@@ -570,6 +988,106 @@ mod tests {
         assert!((d.to_main(10.0, "BRL").unwrap() - 2.0).abs() < 1e-9);
         d.convert = false;
         assert_eq!(d.to_main(10.0, "USD"), None);
+    }
+
+    #[test]
+    fn passed_payments_are_logged() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        // A year of the monthly one, at half price (it's shared by two), cheaper before the rise.
+        let video = d.find_by_name("Video streaming").unwrap();
+        assert_eq!(video.paid.len(), 12);
+        assert!(video.paid.windows(2).all(|w| w[0].date < w[1].date));
+        assert!((video.paid[0].amount - 11.99 / 2.0).abs() < 1e-9);
+        assert!((video.paid[11].amount - 13.99 / 2.0).abs() < 1e-9);
+        assert_eq!(video.next_payment, today + Duration::days(3));
+        // Nothing goes out for a paused one, or before a trial ends.
+        assert!(d.find_by_name("Meal kit box").unwrap().paid.is_empty());
+        assert!(d.find_by_name("Language course app").unwrap().paid.is_empty());
+        // Rolling again over the same days adds nothing; a later day adds the payment that passed.
+        let mut video = video.clone();
+        assert!(!video.roll_forward(today));
+        assert!(video.roll_forward(today + Duration::days(4)));
+        assert_eq!(video.paid.len(), 13);
+        assert_eq!(video.paid_totals().len(), 1);
+    }
+
+    #[test]
+    fn editing_keeps_history() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let s = d.subscriptions.iter_mut().find(|s| s.name == "Music service").unwrap();
+        let paid = s.paid.len();
+        // What the form hands back: no history, a new price.
+        let mut form = s.clone();
+        form.paid.clear();
+        form.amount = 12.99;
+        s.apply_edit(form, today);
+        assert_eq!(s.paid.len(), paid);
+        assert_eq!(s.price_changes.len(), 1);
+        assert_eq!((s.price_changes[0].from, s.price_changes[0].to, s.price_changes[0].date), (10.99, 12.99, today));
+        // Saving again without a change notes nothing.
+        s.apply_edit(s.clone(), today);
+        assert_eq!(s.price_changes.len(), 1);
+        // A different billing cycle isn't a price change.
+        let mut form = s.clone();
+        form.cycle = Cycle::Yearly;
+        form.amount = 120.0;
+        s.apply_edit(form, today);
+        assert_eq!((s.amount, s.price_changes.len()), (120.0, 1));
+        // Cancelling is dated once, and undone by reactivating.
+        let mut form = s.clone();
+        form.status = Status::Cancelled;
+        s.apply_edit(form, today);
+        s.apply_edit(s.clone(), today + Duration::days(30));
+        assert_eq!(s.cancelled_on, Some(today));
+        let saved = s.saved_since_cancelling(today + Duration::days(366)).unwrap();
+        assert!((saved - 120.0).abs() < 1.0, "{saved}");
+        let mut form = s.clone();
+        form.status = Status::Active;
+        s.apply_edit(form, today);
+        assert_eq!(s.cancelled_on, None);
+        assert_eq!(s.saved_since_cancelling(today), None);
+    }
+
+    #[test]
+    fn last_day_to_cancel() {
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        let mut d = Data::default();
+        d.add_examples(day(11, 11));
+        // The gym is paid on the 19th and needs a week's notice.
+        let gym = d.subscriptions.iter_mut().find(|s| s.name == "Gym membership").unwrap();
+        assert_eq!(gym.cancel_by(day(11, 11)), Some((day(11, 12), day(11, 19))));
+        assert_eq!(gym.cancel_by(day(11, 12)), Some((day(11, 12), day(11, 19))));
+        // Too late for that payment: the day for the one after.
+        assert_eq!(gym.cancel_by(day(11, 13)), Some((day(12, 12), day(12, 19))));
+        gym.status = Status::Paused;
+        assert_eq!(gym.cancel_by(day(11, 11)), None);
+        // No notice needed: no last day.
+        assert_eq!(d.find_by_name("Music service").unwrap().cancel_by(day(11, 11)), None);
+    }
+
+    #[test]
+    fn reading_saved_files() {
+        // A file from before layouts were numbered and before history was kept.
+        let old = r#"{"subscriptions":[{"id":1,"name":"News","amount":5.0,"currency":"EUR","cycle":"Monthly",
+            "next_payment":"2026-12-01","status":"Active","source":"Manual"}],"next_id":2}"#;
+        let d = Data::from_json(old).unwrap();
+        assert_eq!(d.version, DATA_VERSION);
+        assert!(d.subscriptions[0].paid.is_empty() && d.subscriptions[0].started_on.is_none());
+        // What this version saves reads back the same.
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let back = Data::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.subscriptions[0].paid, d.subscriptions[0].paid);
+        assert_eq!(back.subscriptions[0].price_changes, d.subscriptions[0].price_changes);
+        // A newer layout is refused rather than read with parts missing.
+        let newer = format!(r#"{{"version":{},"subscriptions":[]}}"#, DATA_VERSION + 1);
+        assert_eq!(Data::from_json(&newer).unwrap_err(), ReadError::Newer);
+        assert_eq!(Data::from_json("not json").unwrap_err(), ReadError::NotAList);
     }
 
     #[test]
