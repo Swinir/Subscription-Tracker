@@ -2,6 +2,7 @@
 
 mod app;
 mod backup;
+mod calendar;
 mod logos;
 mod model;
 mod paypal;

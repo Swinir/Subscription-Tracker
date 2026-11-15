@@ -21,6 +21,9 @@ impl TrackerApp {
                 shared_by: s.shared_by.max(1),
                 notice_days: s.notice_days,
                 usage: s.usage,
+                manage_url: s.manage_url.clone(),
+                payment_method: s.payment_method.clone(),
+                tags: s.tags.join(", "),
                 started: s.started_on.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
                 history: history_lines(s, self.today),
                 error: None,
@@ -41,6 +44,9 @@ impl TrackerApp {
                 shared_by: 1,
                 notice_days: 0,
                 usage: None,
+                manage_url: String::new(),
+                payment_method: String::new(),
+                tags: String::new(),
                 started: String::new(),
                 history: Vec::new(),
                 error: None,
@@ -205,6 +211,25 @@ impl TrackerApp {
                 });
                 ui.end_row();
 
+                ui.label("Cancel page");
+                ui.horizontal(|ui| {
+                    ui.add(field(&mut ed.manage_url, "where you manage or cancel it", 250.0));
+                    if let Some(url) = clean_url(&ed.manage_url) {
+                        if ui.button("Open ↗").on_hover_text(format!("Open {url} in your browser")).clicked() {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Paid with");
+                ui.add(field(&mut ed.payment_method, "e.g. Visa ending 4242, PayPal", 320.0));
+                ui.end_row();
+
+                ui.label("Tags");
+                ui.add(field(&mut ed.tags, "separated by commas, e.g. family, work", 320.0));
+                ui.end_row();
+
                 ui.label("Notes");
                 ui.add(
                     egui::TextEdit::multiline(&mut ed.notes)
@@ -286,6 +311,8 @@ impl TrackerApp {
                 Some("The trial end date has already passed; untick Free trial or change the date.".into())
             } else if !ed.website.trim().is_empty() && logos::clean_domain(&ed.website).is_none() {
                 Some("The website doesn't look right; write it like netflix.com (or leave it empty).".into())
+            } else if !ed.manage_url.trim().is_empty() && clean_url(&ed.manage_url).is_none() {
+                Some("The cancel page address doesn't look right; write it like example.com/account (or leave it empty).".into())
             } else if !ed.started.trim().is_empty() && started.is_none() {
                 Some("Please write the start date like 2025-01-31 (or leave it empty).".into())
             } else {
@@ -318,6 +345,9 @@ impl TrackerApp {
                     price_changes: Vec::new(),
                     notice_days: ed.notice_days,
                     usage: ed.usage,
+                    manage_url: clean_url(&ed.manage_url).unwrap_or_default(),
+                    payment_method: ed.payment_method.trim().to_string(),
+                    tags: parse_tags(&ed.tags),
                 };
                 let existing = ed.id;
                 self.editor = None;

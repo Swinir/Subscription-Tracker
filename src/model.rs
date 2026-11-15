@@ -181,6 +181,15 @@ pub struct Subscription {
     /// How much you use it (None: not said).
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// The page where you manage or cancel it (an https address, or empty).
+    #[serde(default)]
+    pub manage_url: String,
+    /// What pays for it, as the person writes it: "Visa ending 4242".
+    #[serde(default)]
+    pub payment_method: String,
+    /// Words to find it by.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// A payment that went out: what you paid (your share) and when.
@@ -319,7 +328,7 @@ impl Subscription {
 
 /// The layout of the saved file. Raise it, and convert in `Data::from_json`, when a change
 /// can't be read back through field defaults.
-pub const DATA_VERSION: u32 = 1;
+pub const DATA_VERSION: u32 = 2;
 
 /// Why a file couldn't be read as a list.
 #[derive(Debug, PartialEq)]
@@ -358,6 +367,15 @@ pub struct Data {
     /// The person was told about being over budget, and the total hasn't dropped under it since.
     #[serde(default)]
     pub over_budget_notified: bool,
+    /// The categories to choose from, in the person's order ("Other" always exists).
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Colours the person picked for categories (the others get one from their name).
+    #[serde(default)]
+    pub category_colors: BTreeMap<String, [u8; 3]>,
+    /// Keep running in the system tray when the window is closed.
+    #[serde(default)]
+    pub keep_in_tray: bool,
     /// Folder that receives a copy after every change (empty: no backups).
     #[serde(default)]
     pub backup_dir: String,
@@ -437,6 +455,9 @@ impl Default for Data {
             reminded: Vec::new(),
             reminded_cancel: Vec::new(),
             over_budget_notified: false,
+            categories: CATEGORIES.iter().map(|c| c.to_string()).collect(),
+            category_colors: BTreeMap::new(),
+            keep_in_tray: false,
             backup_dir: String::new(),
             backup_keep: 30,
             budget: 0.0,
@@ -456,7 +477,11 @@ impl Data {
         if d.version > DATA_VERSION {
             return Err(ReadError::Newer);
         }
-        // Layouts 0 and 1 differ only in fields that have defaults.
+        // Layouts 0 and 1 have no list of categories: they had the built-in ones. Everything
+        // else that came later has a default.
+        if d.version < 2 {
+            d.categories = CATEGORIES.iter().map(|c| c.to_string()).collect();
+        }
         d.version = DATA_VERSION;
         Ok(d)
     }
@@ -550,14 +575,82 @@ impl Data {
         self.subscriptions.iter().find(|s| normalize_name(&s.name) == n)
     }
 
+    /// The categories to choose from: the person's own list, then any a subscription uses that
+    /// isn't in it (from an import or a backup), and always "Other".
     pub fn categories(&self) -> Vec<String> {
-        let mut out: Vec<String> = CATEGORIES.iter().map(|c| c.to_string()).collect();
+        let mut out: Vec<String> = self.categories.clone();
         for s in &self.subscriptions {
             if !s.category.is_empty() && !out.iter().any(|c| c.eq_ignore_ascii_case(&s.category)) {
                 out.push(s.category.clone());
             }
         }
+        if !out.iter().any(|c| c.eq_ignore_ascii_case(OTHER)) {
+            out.push(OTHER.to_string());
+        }
         out
+    }
+
+    /// A name for a category that is free to use: trimmed, not empty, not too long, not taken
+    /// (`renaming` is the one being renamed, whose own name may be reused).
+    fn free_category_name(&self, name: &str, renaming: Option<&str>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Please give the category a name.".into());
+        }
+        if name.chars().count() > 30 {
+            return Err("Please keep the name to 30 letters.".into());
+        }
+        let taken = self.categories().iter().any(|c| c.eq_ignore_ascii_case(name) && !renaming.is_some_and(|r| r.eq_ignore_ascii_case(c)));
+        if taken {
+            return Err(format!("There is already a category called {name}."));
+        }
+        Ok(name.to_string())
+    }
+
+    pub fn add_category(&mut self, name: &str) -> Result<(), String> {
+        let name = self.free_category_name(name, None)?;
+        self.categories = self.categories();
+        self.categories.push(name);
+        Ok(())
+    }
+
+    /// Renames a category, in the list and on every subscription in it; its colour goes along.
+    pub fn rename_category(&mut self, from: &str, to: &str) -> Result<(), String> {
+        if from.eq_ignore_ascii_case(OTHER) {
+            return Err("\"Other\" is where the rest goes, so it keeps its name.".into());
+        }
+        let to = self.free_category_name(to, Some(from))?;
+        self.categories = self.categories();
+        for c in self.categories.iter_mut().filter(|c| c.eq_ignore_ascii_case(from)) {
+            *c = to.clone();
+        }
+        for s in self.subscriptions.iter_mut().filter(|s| s.category.eq_ignore_ascii_case(from)) {
+            s.category = to.clone();
+        }
+        if let Some(key) = self.category_colors.keys().find(|k| k.eq_ignore_ascii_case(from)).cloned() {
+            if let Some(color) = self.category_colors.remove(&key) {
+                self.category_colors.insert(to, color);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a category; what was in it moves to "Other".
+    pub fn delete_category(&mut self, name: &str) {
+        if name.eq_ignore_ascii_case(OTHER) {
+            return;
+        }
+        self.categories = self.categories();
+        self.categories.retain(|c| !c.eq_ignore_ascii_case(name));
+        for s in self.subscriptions.iter_mut().filter(|s| s.category.eq_ignore_ascii_case(name)) {
+            s.category = OTHER.to_string();
+        }
+        self.category_colors.retain(|k, _| !k.eq_ignore_ascii_case(name));
+    }
+
+    /// The colour the person picked for a category, if they did.
+    pub fn category_color(&self, name: &str) -> Option<[u8; 3]> {
+        self.category_colors.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, c)| *c)
     }
 
     pub fn has_name(&self, name: &str) -> bool {
@@ -612,6 +705,19 @@ impl Data {
                     "Music service" | "Code assistant" => Some(Usage::Often),
                     _ => None,
                 },
+                manage_url: if name == "Gym membership" { "https://example.com/membership".to_string() } else { String::new() },
+                payment_method: match name {
+                    "Video streaming" | "Music service" | "Game pass" => "Visa ending 4242",
+                    "Gym membership" => "Bank transfer",
+                    "Cloud storage 2 TB" | "VPN" => "PayPal",
+                    _ => "",
+                }
+                .to_string(),
+                tags: match name {
+                    "Video streaming" => vec!["family".to_string()],
+                    "Gym membership" | "Meal kit box" => vec!["health".to_string()],
+                    _ => Vec::new(),
+                },
             };
             // A year of past payments (none for the one still in its free trial): rolling
             // forward from a year back logs them and lands on the same next payment.
@@ -637,6 +743,9 @@ impl Data {
     }
 }
 
+/// The category everything else goes in; it can't be renamed or removed.
+pub const OTHER: &str = "Other";
+
 pub const CATEGORIES: [&str; 11] = [
     "Streaming",
     "Music",
@@ -654,6 +763,31 @@ pub const CATEGORIES: [&str; 11] = [
 pub const CURRENCIES: [&str; 14] = [
     "EUR", "USD", "GBP", "CHF", "CAD", "AUD", "JPY", "PLN", "SEK", "NOK", "DKK", "CZK", "HUF", "BRL",
 ];
+
+/// Words to find a subscription by, from what the person typed: separated by commas,
+/// without empty ones or repeats, at most eight.
+pub fn parse_tags(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in text.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        if out.len() < 8 && !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// A web address the person typed, made ready to open: `example.com/account` becomes
+/// `https://example.com/account`. Only http and https addresses with a real host are accepted.
+pub fn clean_url(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let lower = t.to_lowercase();
+    let full = if lower.starts_with("http://") || lower.starts_with("https://") { t.to_string() } else { format!("https://{t}") };
+    let host = full.split("://").nth(1)?.split(['/', '?', '#']).next()?;
+    (host.contains('.') && !host.starts_with('.') && !host.ends_with('.')).then_some(full)
+}
 
 pub fn normalize_name(name: &str) -> String {
     name.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
@@ -732,9 +866,76 @@ pub fn parse_user_date(text: &str) -> Option<NaiveDate> {
     None
 }
 
+/// Every payment of the active subscriptions between two days (inclusive), by date.
+pub fn payments_between(subs: &[Subscription], from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, Subscription)> {
+    let mut out = Vec::new();
+    for s in subs.iter().filter(|s| s.is_active()) {
+        let mut d = s.next_payment;
+        let mut guard = 0;
+        while d <= to && guard < 600 {
+            if d >= from {
+                out.push((d, s.clone()));
+            }
+            d = s.cycle.advance(d, s.billing_day);
+            guard += 1;
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_categories() {
+        // A file from before the list existed gets the built-in categories.
+        let old = r#"{"subscriptions":[{"id":1,"name":"News","amount":5.0,"currency":"EUR","cycle":"Monthly",
+            "next_payment":"2026-12-01","status":"Active","source":"Manual","category":"Pets"}],"next_id":2}"#;
+        let mut d = Data::from_json(old).unwrap();
+        assert!(d.categories.contains(&"Streaming".to_string()));
+        // One a subscription uses is offered too, and "Other" always is.
+        assert!(d.categories().contains(&"Pets".to_string()) && d.categories().contains(&"Other".to_string()));
+
+        assert!(d.add_category("  Travel ").is_ok());
+        assert!(d.add_category("travel").unwrap_err().contains("already"));
+        assert!(d.add_category("   ").is_err());
+        assert!(d.add_category(&"x".repeat(31)).is_err());
+
+        d.category_colors.insert("Pets".into(), [1, 2, 3]);
+        d.rename_category("pets", "Animals").unwrap();
+        assert_eq!(d.subscriptions[0].category, "Animals");
+        assert_eq!(d.category_color("animals"), Some([1, 2, 3]));
+        assert!(d.categories().contains(&"Animals".to_string()) && !d.categories().contains(&"Pets".to_string()));
+        // Changing only the capitals of its own name is fine; taking another's name is not.
+        assert!(d.rename_category("Animals", "ANIMALS").is_ok());
+        assert!(d.rename_category("Animals", "Music").is_err());
+        assert!(d.rename_category("Other", "Misc").is_err());
+
+        d.delete_category("Animals");
+        assert_eq!(d.subscriptions[0].category, "Other");
+        assert_eq!(d.category_color("Animals"), None);
+        d.delete_category("Other");
+        assert!(d.categories().contains(&"Other".to_string()));
+
+        // What is saved reads back as it was, with no built-in ones put back.
+        d.delete_category("Music");
+        let back = Data::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(!back.categories().contains(&"Music".to_string()));
+        assert!(back.categories().contains(&"Travel".to_string()));
+    }
+
+    #[test]
+    fn tags_and_addresses() {
+        assert_eq!(parse_tags(" family, Work ,, family,"), ["family", "Work"]);
+        assert_eq!(parse_tags("a,b,c,d,e,f,g,h,i,j").len(), 8);
+        assert_eq!(clean_url("example.com/account").as_deref(), Some("https://example.com/account"));
+        assert_eq!(clean_url(" http://example.com ").as_deref(), Some("http://example.com"));
+        for bad in ["", "javascript:alert(1)", "file:///c:/x", "example", "https://", "has space.com", "ftp://example.com"] {
+            assert_eq!(clean_url(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn monthly_keeps_anchor_day() {

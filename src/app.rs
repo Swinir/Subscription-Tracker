@@ -67,6 +67,10 @@ struct Editor {
     shared_by: u32,
     notice_days: u32,
     usage: Option<Usage>,
+    manage_url: String,
+    payment_method: String,
+    /// The tags as typed, separated by commas.
+    tags: String,
     /// The day it started, as typed (empty: not known).
     started: String,
     /// What is known of its past (payments, price changes, cancellation), one line each.
@@ -94,6 +98,8 @@ impl ImportState {
 enum Confirm {
     Delete(u64),
     DeleteAll,
+    /// Remove a category: what is in it moves to "Other".
+    DeleteCategory(String),
     /// Replace the list with a backup: where it came from (shown), and what's in it.
     Restore(String, Box<Data>),
 }
@@ -127,6 +133,10 @@ pub struct TrackerApp {
     restore_pick: usize,
     backup_failed: bool,
     budget_text: String,
+    /// The name typed for a new category.
+    new_category: String,
+    /// The category being renamed, and the name typed for it so far.
+    renaming: Option<(String, String)>,
     /// The month shown in the calendar.
     cal_month: NaiveDate,
     /// A download of exchange rates under way, and whether the person asked for it.
@@ -216,6 +226,8 @@ impl TrackerApp {
             restore_pick: 0,
             backup_failed: false,
             budget_text: String::new(),
+            new_category: String::new(),
+            renaming: None,
             cal_month: insights::month_start(today),
             rates_job: None,
             rates_tried: false,
@@ -544,6 +556,15 @@ impl TrackerApp {
                 let name = self.data.subscriptions.iter().find(|s| s.id == *id).map(|s| s.name.clone()).unwrap_or_default();
                 (format!("Delete {name}?"), "It will be removed from your list.".to_string(), "Delete", RED)
             }
+            Confirm::DeleteCategory(name) => {
+                let n = self.data.subscriptions.iter().filter(|s| s.category.eq_ignore_ascii_case(name)).count();
+                (
+                    format!("Delete the category {name}?"),
+                    format!("The {n} subscription{} in it will move to Other.", plural(n)),
+                    "Delete",
+                    RED,
+                )
+            }
             Confirm::DeleteAll => (
                 "Delete all subscriptions?".to_string(),
                 format!("All {} subscriptions will be removed. You can undo it right afterwards.", self.data.subscriptions.len()),
@@ -593,6 +614,10 @@ impl TrackerApp {
                     self.delete_with_undo(|s| s.id == id, format!("Deleted {name}"));
                 }
                 Some(Confirm::DeleteAll) => self.delete_with_undo(|_| true, "Deleted all subscriptions"),
+                Some(Confirm::DeleteCategory(name)) => {
+                    self.data.delete_category(&name);
+                    self.notify(format!("Deleted the category {name}"));
+                }
                 Some(Confirm::Restore(_, d)) => self.restore(*d),
                 None => {}
             }
@@ -786,6 +811,14 @@ fn relative_day(d: NaiveDate, today: NaiveDate) -> String {
         1 => "Tomorrow".into(),
         2..=59 => format!("In {days} days"),
         _ => format!("In {} months", days / 30),
+    }
+}
+
+/// The colour of a category: the one the person picked, or one from its name.
+fn category_color(data: &Data, name: &str) -> Color32 {
+    match data.category_color(name) {
+        Some([r, g, b]) => Color32::from_rgb(r, g, b),
+        None => theme::color_for(name),
     }
 }
 

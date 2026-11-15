@@ -4,24 +4,6 @@
 use super::*;
 use chrono::Months;
 
-/// Every payment of the active subscriptions between two days (inclusive), by date.
-pub(super) fn payments_between(subs: &[Subscription], from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, Subscription)> {
-    let mut out = Vec::new();
-    for s in subs.iter().filter(|s| s.is_active()) {
-        let mut d = s.next_payment;
-        let mut guard = 0;
-        while d <= to && guard < 600 {
-            if d >= from {
-                out.push((d, s.clone()));
-            }
-            d = s.cycle.advance(d, s.billing_day);
-            guard += 1;
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
-    out
-}
-
 pub(super) fn month_start(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap()
 }
@@ -444,6 +426,34 @@ impl TrackerApp {
                 if changes.len() > 8 {
                     ui.label(RichText::new(format!("+ {} more", changes.len() - 8)).size(12.5).color(MUTED()));
                 }
+            });
+        }
+        // ----- what each payment method pays -----
+        let mut methods: BTreeMap<String, (f64, usize)> = BTreeMap::new();
+        for s in self.data.subscriptions.iter().filter(|s| s.is_active() && !s.payment_method.trim().is_empty()) {
+            if let Some(v) = self.data.to_main(s.monthly_cost(), &s.currency) {
+                let entry = methods.entry(s.payment_method.trim().to_string()).or_default();
+                entry.0 += v;
+                entry.1 += 1;
+            }
+        }
+        if !methods.is_empty() {
+            ui.add_space(12.0);
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                section_title(ui, "What each payment method pays");
+                let mut rows: Vec<(String, (f64, usize))> = methods.into_iter().collect();
+                rows.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+                for (name, (value, count)) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        ui.label(RichText::new(format!("{count} subscription{}", plural(count))).color(MUTED()));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(format!("{} per month", format_money(value, &main))).strong());
+                        });
+                    });
+                }
+                ui.label(RichText::new("Handy when a card expires: these are the subscriptions to update.").size(12.0).color(MUTED()));
             });
         }
         if let Some(id) = open_id {

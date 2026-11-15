@@ -14,7 +14,7 @@ impl TrackerApp {
         );
 
         ui.horizontal(|ui| {
-            ui.add(field(&mut self.search, "🔍  Search by name, category or note", 300.0));
+            ui.add(field(&mut self.search, "🔍  Search by name, category, tag or note", 300.0));
             let filter_text = match self.filter {
                 StatusFilter::All => "All statuses".to_string(),
                 StatusFilter::Only(s) => s.label().to_string(),
@@ -60,6 +60,8 @@ impl TrackerApp {
                     || s.name.to_lowercase().contains(&q)
                     || s.category.to_lowercase().contains(&q)
                     || s.notes.to_lowercase().contains(&q)
+                    || s.payment_method.to_lowercase().contains(&q)
+                    || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
             })
             .cloned()
             .collect();
@@ -137,6 +139,9 @@ impl TrackerApp {
             }
             if s.usage == Some(Usage::Rarely) {
                 sub.push_str(" · rarely used");
+            }
+            if !s.tags.is_empty() {
+                sub.push_str(&format!(" · {}", s.tags.join(", ")));
             }
             cp.text(pos2(c0.left() + 46.0, cy + 10.0), Align2::LEFT_CENTER, sub, FontId::proportional(12.0), MUTED());
 

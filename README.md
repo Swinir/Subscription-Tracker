@@ -16,6 +16,8 @@ Everything stays on your computer. There's no account, and no server is involved
 - **Reminders**: a system notification a few days before a payment, and before the last day to cancel when a subscription needs notice. On Windows the app can open in the background when you sign in so reminders still arrive.
 - **Multiple currencies**: amounts are converted using the European Central Bank's free daily reference rates. Nothing about you is sent.
 - **Backups**: copies of your list saved to a folder of your choice, such as one that OneDrive, Google Drive, Dropbox, iCloud or Proton Drive keeps in sync.
+- **Your own organisation**: your own categories (add, rename, recolour), tags, what pays for each subscription (so you know what to update when a card expires), and the page where you cancel it.
+- **Calendar export**: the next 12 months of payments, and last days to cancel, as a calendar file (.ics) for any calendar app.
 - **CSV export** (and reading that spreadsheet back in, for example on another computer), shop logos, and light and dark themes.
 
 ## Building

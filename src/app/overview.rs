@@ -210,7 +210,7 @@ impl TrackerApp {
                     let share = if monthly > 0.0 { value / monthly } else { 0.0 };
                     ui.horizontal(|ui| {
                         let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.5, theme::color_for(cat));
+                        ui.painter().circle_filled(dot.center(), 4.5, category_color(&self.data, cat));
                         ui.label(cat);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(RichText::new(format!("{:.0}%", share * 100.0)).color(MUTED()).size(12.5));
@@ -222,7 +222,7 @@ impl TrackerApp {
                     p.rect_filled(bar, CornerRadius::same(4), BORDER());
                     let mut fill = bar;
                     fill.set_width((bar.width() * share as f32).max(6.0));
-                    p.rect_filled(fill, CornerRadius::same(4), theme::color_for(cat));
+                    p.rect_filled(fill, CornerRadius::same(4), category_color(&self.data, cat));
                     ui.add_space(6.0);
                 }
                 if cats.len() > 6 {

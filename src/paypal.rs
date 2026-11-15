@@ -1213,6 +1213,9 @@ mod tests {
             price_changes: Vec::new(),
             notice_days: 0,
             usage: None,
+            manage_url: String::new(),
+            payment_method: String::new(),
+            tags: Vec::new(),
         });
         let csv = "Datum;Uhrzeit;Name;Typ;Status;Währung;Brutto\n\
                    01.09.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\

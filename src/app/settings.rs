@@ -70,6 +70,9 @@ impl TrackerApp {
         });
         ui.add_space(12.0);
 
+        self.categories_card(ui);
+        ui.add_space(12.0);
+
         card_frame(PANEL()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             section_title(ui, "Payment reminders");
@@ -176,7 +179,7 @@ impl TrackerApp {
                 ui.label(RichText::new("Picture mode: changes aren't saved.").color(ORANGE));
             }
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if plain_button(ui, "Export to a spreadsheet (CSV)…", 260.0).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_title("Export subscriptions")
@@ -201,6 +204,22 @@ impl TrackerApp {
                             }
                             Ok(_) => self.notify("That isn't a spreadsheet exported here. For a bank or PayPal file, use Import payments."),
                             Err(e) => self.notify(format!("Couldn't open the file: {e}")),
+                        }
+                    }
+                }
+                if plain_button(ui, "Export payment dates (.ics)…", 240.0)
+                    .on_hover_text("A calendar file with the next 12 months of payments and last days to cancel, for any calendar app.")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Export payment dates")
+                        .set_file_name("subscription-payments.ics")
+                        .add_filter("Calendar", &["ics"])
+                        .save_file()
+                    {
+                        match std::fs::write(&path, crate::calendar::ics(&self.data, self.today, 365)) {
+                            Ok(()) => self.notify("Exported the payment dates"),
+                            Err(e) => self.notify(format!("Couldn't export: {e}")),
                         }
                     }
                 }
@@ -486,6 +505,116 @@ impl TrackerApp {
                 let label = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 self.ask_restore(&path, label);
             }
+        }
+    }
+}
+
+/// What a click in the categories card asks for, done after the card is drawn.
+enum CategoryAction {
+    Recolor(String, [u8; 3]),
+    StartRename(String),
+    Commit(String, String),
+    CancelRename,
+    Delete(String),
+}
+
+impl TrackerApp {
+    pub(super) fn categories_card(&mut self, ui: &mut egui::Ui) {
+        let mut action: Option<CategoryAction> = None;
+        card_frame(PANEL()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            section_title(ui, "Categories");
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Group your subscriptions your own way: add, rename or recolour them. Deleting one moves its subscriptions to Other.")
+                        .color(MUTED()),
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+            for cat in self.data.categories() {
+                let used = self
+                    .data
+                    .subscriptions
+                    .iter()
+                    .filter(|s| if s.category.is_empty() { cat.eq_ignore_ascii_case(OTHER) } else { s.category.eq_ignore_ascii_case(&cat) })
+                    .count();
+                ui.horizontal(|ui| {
+                    let current = category_color(&self.data, &cat);
+                    let mut rgb = [current.r(), current.g(), current.b()];
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        action = Some(CategoryAction::Recolor(cat.clone(), rgb));
+                    }
+                    let editing = matches!(&self.renaming, Some((from, _)) if *from == cat);
+                    if editing {
+                        if let Some((_, draft)) = &mut self.renaming {
+                            let response = ui.add(field(draft, "", 180.0));
+                            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if ui.button("Save").clicked() || enter {
+                                action = Some(CategoryAction::Commit(cat.clone(), draft.clone()));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                action = Some(CategoryAction::CancelRename);
+                            }
+                        }
+                    } else {
+                        ui.label(&cat);
+                        ui.label(RichText::new(used.to_string()).color(MUTED()).size(12.5));
+                        if !cat.eq_ignore_ascii_case(OTHER) {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Delete").clicked() {
+                                    action = Some(CategoryAction::Delete(cat.clone()));
+                                }
+                                if ui.button("Rename").clicked() {
+                                    action = Some(CategoryAction::StartRename(cat.clone()));
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let response = ui.add(field(&mut self.new_category, "New category", 200.0));
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Add").clicked() || enter) && !self.new_category.trim().is_empty() {
+                    match self.data.add_category(&self.new_category) {
+                        Ok(()) => {
+                            self.new_category.clear();
+                            self.dirty = true;
+                        }
+                        Err(e) => self.notify(e),
+                    }
+                }
+            });
+        });
+        match action {
+            Some(CategoryAction::Recolor(name, rgb)) => {
+                self.data.category_colors.retain(|k, _| !k.eq_ignore_ascii_case(&name));
+                self.data.category_colors.insert(name, rgb);
+                self.dirty = true;
+            }
+            Some(CategoryAction::StartRename(name)) => self.renaming = Some((name.clone(), name)),
+            Some(CategoryAction::CancelRename) => self.renaming = None,
+            Some(CategoryAction::Commit(from, to)) => match self.data.rename_category(&from, &to) {
+                Ok(()) => {
+                    self.renaming = None;
+                    self.dirty = true;
+                    self.notify(format!("Renamed to {}", to.trim()));
+                }
+                Err(e) => self.notify(e),
+            },
+            Some(CategoryAction::Delete(name)) => {
+                let in_it = self.data.subscriptions.iter().filter(|s| s.category.eq_ignore_ascii_case(&name)).count();
+                if in_it == 0 {
+                    self.data.delete_category(&name);
+                    self.dirty = true;
+                    self.notify(format!("Deleted the category {name}"));
+                } else {
+                    self.confirm = Some(Confirm::DeleteCategory(name));
+                }
+            }
+            None => {}
         }
     }
 }
