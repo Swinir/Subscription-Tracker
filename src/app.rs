@@ -2,7 +2,7 @@
 
 use crate::model::*;
 use crate::paypal::{self, Columns, DateOrder, ImportResult};
-use crate::{backup, logos, reminders};
+use crate::{backup, logos, reminders, tray};
 use crate::storage::{self, Loaded};
 use crate::theme::{self, *};
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -124,6 +124,16 @@ pub struct TrackerApp {
     shot_sent_at: Option<u32>,
     logos: logos::Logos,
     last_reminder_check: Option<std::time::Instant>,
+    /// The tray icon, while the person wants the app to stay in the tray.
+    tray: Option<tray::Tray>,
+    /// Why the tray icon couldn't be made (it isn't tried again until the setting changes).
+    tray_problem: Option<String>,
+    /// What the tray menu says about the next payment.
+    tray_next: String,
+    /// The window was minimized by closing it, with the app staying in the tray.
+    hidden: bool,
+    /// Quit was asked for: closing the window really closes the app.
+    quitting: bool,
     /// Whether the app opens at sign-in (asked of Windows when Settings is first shown).
     sign_in: Option<bool>,
     /// Cloud folders found on this computer (looked for when Settings is first shown).
@@ -220,6 +230,11 @@ impl TrackerApp {
             shot_sent_at: None,
             logos: logos::Logos::new(online),
             last_reminder_check: None,
+            tray: None,
+            tray_problem: None,
+            tray_next: String::new(),
+            hidden: false,
+            quitting: false,
             sign_in: None,
             clouds: None,
             backups: None,
@@ -429,6 +444,66 @@ impl TrackerApp {
         }
         if self.data.reminded.len() != before || self.data.reminded_cancel.len() != before_cancel {
             self.dirty = true;
+        }
+    }
+
+    // ---------- tray ----------
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    /// Keeps the tray icon in line with the setting, answers its clicks, and sends the
+    /// window to the tray when it's closed.
+    fn tray_tick(&mut self, ctx: &egui::Context) {
+        if !self.persist {
+            return;
+        }
+        match (self.data.keep_in_tray, self.tray.is_some()) {
+            (true, false) if self.tray_problem.is_none() => match tray::Tray::new(ctx) {
+                Ok(t) => self.tray = Some(t),
+                Err(e) => {
+                    self.notify(format!("Couldn't put the icon in the tray: {e}"));
+                    self.tray_problem = Some(e);
+                }
+            },
+            (false, true) => {
+                self.tray = None;
+                self.tray_next.clear();
+                if self.hidden {
+                    self.show_window(ctx);
+                }
+            }
+            _ => {}
+        }
+        let Some(t) = &self.tray else { return };
+        for action in t.poll() {
+            match action {
+                tray::Action::Open => self.show_window(ctx),
+                tray::Action::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        // Closing the window minimizes it instead, unless Quit was asked for. (A window that is
+        // hidden altogether is never redrawn, so reminders and the tray icon's clicks would stop.)
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.hidden = true;
+        }
+        if let Some(t) = &self.tray {
+            let text = match reminders::due_soon(&self.data, self.today, 365).first() {
+                Some(s) => format!("Next: {}", reminders::line(s, self.today)),
+                None => "No payments coming up".to_string(),
+            };
+            if text != self.tray_next {
+                t.set_next(&text);
+                self.tray_next = text;
+            }
         }
     }
 
@@ -702,6 +777,8 @@ impl eframe::App for TrackerApp {
             self.check_reminders();
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(5 * 60));
+
+        self.tray_tick(ctx);
 
         self.handle_dropped_files(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) && self.editor.is_none() {

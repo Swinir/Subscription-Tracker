@@ -10,6 +10,7 @@ mod rates;
 mod reminders;
 mod storage;
 mod theme;
+mod tray;
 
 use eframe::egui;
 use std::path::PathBuf;

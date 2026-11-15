@@ -20,5 +20,8 @@ image = { version = "0.25", default-features = false, features = ["png", "ico", 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
 
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false }
+
 [profile.release]
 opt-level = 3

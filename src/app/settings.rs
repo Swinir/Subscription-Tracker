@@ -73,6 +73,29 @@ impl TrackerApp {
         self.categories_card(ui);
         ui.add_space(12.0);
 
+        if tray::AVAILABLE {
+            card_frame(PANEL()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                section_title(ui, "System tray");
+                if ui.checkbox(&mut self.data.keep_in_tray, "Keep running in the system tray when I close the window").changed() {
+                    self.dirty = true;
+                    self.tray_problem = None;
+                }
+                ui.label(
+                    RichText::new(
+                        "Closing the window then only minimizes it, so the app stays open and reminders keep arriving. \
+                         Click the tray icon to bring it back, or use Quit from its menu to close it for good.",
+                    )
+                    .size(12.5)
+                    .color(MUTED()),
+                );
+                if let Some(e) = &self.tray_problem {
+                    ui.label(RichText::new(format!("Couldn't put the icon in the tray: {e}")).color(ORANGE));
+                }
+            });
+            ui.add_space(12.0);
+        }
+
         card_frame(PANEL()).show(ui, |ui| {
             ui.set_width(ui.available_width());
             section_title(ui, "Payment reminders");
