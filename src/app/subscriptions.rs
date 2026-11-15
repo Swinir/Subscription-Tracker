@@ -135,6 +135,9 @@ impl TrackerApp {
             if s.is_shared() {
                 sub.push_str(&format!(" · shared by {}", s.shared_by));
             }
+            if s.usage == Some(Usage::Rarely) {
+                sub.push_str(" · rarely used");
+            }
             cp.text(pos2(c0.left() + 46.0, cy + 10.0), Align2::LEFT_CENTER, sub, FontId::proportional(12.0), MUTED());
 
             clip(col(1)).text(pos2(col(1).left(), cy), Align2::LEFT_CENTER, s.cycle.label(), FontId::proportional(14.0), TEXT());

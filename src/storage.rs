@@ -1,6 +1,6 @@
 //! Saving and loading the person's subscriptions, and exporting them as CSV.
 
-use crate::model::{parse_user_date, Cycle, Data, ReadError, Source, Status, Subscription};
+use crate::model::{parse_user_date, Cycle, Data, ReadError, Source, Status, Subscription, Usage};
 use std::path::{Path, PathBuf};
 
 pub fn data_path() -> PathBuf {
@@ -88,6 +88,7 @@ pub fn import_csv(text: &str) -> Result<Vec<Subscription>, String> {
             paid: Vec::new(),
             price_changes: Vec::new(),
             notice_days: get("Days of notice to cancel").parse().unwrap_or(0),
+            usage: Usage::ALL.into_iter().find(|u| u.label() == get("Still using it?")),
         });
     }
     Ok(out)
@@ -98,7 +99,7 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
     w.write_record([
         "Name", "Amount", "Currency", "Billing cycle", "Next payment", "Monthly cost", "Yearly cost", "Category", "Status",
         "Added from", "Notes", "Website", "Shared by", "Free trial until", "Started on", "Cancelled on", "Payments so far",
-        "Paid so far", "Days of notice to cancel",
+        "Paid so far", "Days of notice to cancel", "Still using it?",
     ])
     .map_err(|e| e.to_string())?;
     let day = |d: Option<chrono::NaiveDate>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
@@ -123,6 +124,7 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
             s.paid.len().to_string(),
             s.paid_totals().iter().map(|(c, v)| format!("{v:.2} {c}")).collect::<Vec<_>>().join(" + "),
             s.notice_days.to_string(),
+            s.usage.map(|u| u.label()).unwrap_or("").to_string(),
         ])
         .map_err(|e| e.to_string())?;
     }
@@ -152,7 +154,7 @@ mod tests {
                 (&a.name, a.amount, &a.currency, a.cycle, a.next_payment, a.status, a.source, &a.notes, a.shared_by),
                 (&b.name, b.amount, &b.currency, b.cycle, b.next_payment, b.status, b.source, &b.notes, b.shared_by)
             );
-            assert_eq!((a.trial_until, a.started_on, a.notice_days, &a.category), (b.trial_until, b.started_on, b.notice_days, &b.category));
+            assert_eq!((a.trial_until, a.started_on, a.notice_days, &a.category, a.usage), (b.trial_until, b.started_on, b.notice_days, &b.category, b.usage));
         }
         // A spreadsheet from before the newer columns existed still reads.
         let old = "Name,Amount,Currency,Billing cycle,Next payment,Monthly cost\nNews,5.00,EUR,Monthly,2026-12-01,5.00\n";

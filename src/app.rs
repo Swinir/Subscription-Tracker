@@ -66,6 +66,7 @@ struct Editor {
     trial: bool,
     shared_by: u32,
     notice_days: u32,
+    usage: Option<Usage>,
     /// The day it started, as typed (empty: not known).
     started: String,
     /// What is known of its past (payments, price changes, cancellation), one line each.
@@ -392,6 +393,27 @@ impl TrackerApp {
             if reminders::notify(&title, &body) {
                 self.data.reminded_cancel.extend(marks);
             }
+        }
+        // Being over the budget is told once, until the total has been back under it.
+        match reminders::over_budget(&self.data) {
+            Some(over) if !self.data.over_budget_notified => {
+                let main = &self.data.main_currency;
+                let body = format!(
+                    "You pay {} per month, {} more than your budget of {}.",
+                    format_money(self.data.monthly_total(), main),
+                    format_money(over, main),
+                    format_money(self.data.budget, main)
+                );
+                if reminders::notify("Over budget", &body) {
+                    self.data.over_budget_notified = true;
+                    self.dirty = true;
+                }
+            }
+            None if self.data.over_budget_notified => {
+                self.data.over_budget_notified = false;
+                self.dirty = true;
+            }
+            _ => {}
         }
         if self.data.reminded.len() != before || self.data.reminded_cancel.len() != before_cancel {
             self.dirty = true;

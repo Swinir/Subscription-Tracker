@@ -485,6 +485,7 @@ impl TrackerApp {
                         paid: Vec::new(),
                         price_changes,
                         notice_days: 0,
+                        usage: None,
                         trial_until: None,
                         shared_by: 1,
                         id: 0,

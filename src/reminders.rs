@@ -43,6 +43,12 @@ pub fn cancel_line(s: &Subscription, by: NaiveDate, payment: NaiveDate, today: N
     )
 }
 
+/// How much the monthly total is over the budget; None without a budget or while within it.
+pub fn over_budget(data: &Data) -> Option<f64> {
+    let over = data.monthly_total() - data.budget;
+    (data.budget > 0.0 && over > 0.004).then_some(over)
+}
+
 pub fn when(d: NaiveDate, today: NaiveDate) -> String {
     match (d - today).num_days() {
         0 => "today".into(),
@@ -196,6 +202,19 @@ pub fn set_open_at_sign_in(on: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn going_over_budget() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = crate::model::Data::default();
+        d.add_examples(today);
+        assert_eq!(super::over_budget(&d), None); // no budget set
+        d.budget = 100.0;
+        let over = super::over_budget(&d).unwrap();
+        assert!((over - (d.monthly_total() - 100.0)).abs() < 1e-9 && over > 0.0);
+        d.budget = 500.0;
+        assert_eq!(super::over_budget(&d), None);
+    }
+
     #[test]
     fn last_days_to_cancel() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();

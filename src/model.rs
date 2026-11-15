@@ -101,6 +101,25 @@ impl Status {
     }
 }
 
+/// How much the person uses a subscription, as they say.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Usage {
+    Often,
+    Sometimes,
+    Rarely,
+}
+
+impl Usage {
+    pub const ALL: [Usage; 3] = [Usage::Often, Usage::Sometimes, Usage::Rarely];
+    pub fn label(self) -> &'static str {
+        match self {
+            Usage::Often => "Often",
+            Usage::Sometimes => "Sometimes",
+            Usage::Rarely => "Rarely or never",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
     Manual,
@@ -159,6 +178,9 @@ pub struct Subscription {
     /// How many days before a renewal it must be cancelled (0: any time).
     #[serde(default)]
     pub notice_days: u32,
+    /// How much you use it (None: not said).
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// A payment that went out: what you paid (your share) and when.
@@ -333,6 +355,9 @@ pub struct Data {
     /// Last days to cancel already reminded about (subscription id, that day).
     #[serde(default)]
     pub reminded_cancel: Vec<(u64, NaiveDate)>,
+    /// The person was told about being over budget, and the total hasn't dropped under it since.
+    #[serde(default)]
+    pub over_budget_notified: bool,
     /// Folder that receives a copy after every change (empty: no backups).
     #[serde(default)]
     pub backup_dir: String,
@@ -411,6 +436,7 @@ impl Default for Data {
             remind_days: 3,
             reminded: Vec::new(),
             reminded_cancel: Vec::new(),
+            over_budget_notified: false,
             backup_dir: String::new(),
             backup_keep: 30,
             budget: 0.0,
@@ -580,6 +606,12 @@ impl Data {
                 price_changes: Vec::new(),
                 // One that needs a week's notice, so its last day to cancel shows.
                 notice_days: if name == "Gym membership" { 7 } else { 0 },
+                // And what they say about using them, so the review shows.
+                usage: match name {
+                    "Gym membership" => Some(Usage::Rarely),
+                    "Music service" | "Code assistant" => Some(Usage::Often),
+                    _ => None,
+                },
             };
             // A year of past payments (none for the one still in its free trial): rolling
             // forward from a year back logs them and lands on the same next payment.

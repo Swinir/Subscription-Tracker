@@ -57,6 +57,28 @@ impl TrackerApp {
             banner(ui, BLUE, "Cancel in time:", &reminders::describe(lines, 4).replace('\n', " · "));
         }
 
+        // The ones you say you rarely use, dearest first: the easiest savings.
+        let mut rarely: Vec<(&Subscription, f64)> = self
+            .data
+            .subscriptions
+            .iter()
+            .filter(|s| s.is_active() && s.usage == Some(Usage::Rarely))
+            .filter_map(|s| self.data.to_main(s.yearly_cost(), &s.currency).map(|v| (s, v)))
+            .collect();
+        rarely.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if !rarely.is_empty() {
+            let names: Vec<String> =
+                rarely.iter().take(3).map(|(s, v)| format!("{} ({} a year)", s.name, format_money(*v, &main))).collect();
+            let more = if rarely.len() > 3 { format!(" and {} more", rarely.len() - 3) } else { String::new() };
+            let total: f64 = rarely.iter().map(|r| r.1).sum();
+            banner(
+                ui,
+                ACCENT,
+                "Worth a second look:",
+                &format!("you say you rarely use {}{more}. Cancelling would save {} a year.", names.join(" · "), format_money(total, &main)),
+            );
+        }
+
         let budget = self.data.budget;
         if budget > 0.0 && monthly > budget + 0.004 {
             egui::Frame::new()

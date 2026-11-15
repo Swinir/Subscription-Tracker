@@ -20,6 +20,7 @@ impl TrackerApp {
                 trial: s.in_trial(self.today),
                 shared_by: s.shared_by.max(1),
                 notice_days: s.notice_days,
+                usage: s.usage,
                 started: s.started_on.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
                 history: history_lines(s, self.today),
                 error: None,
@@ -39,6 +40,7 @@ impl TrackerApp {
                 trial: false,
                 shared_by: 1,
                 notice_days: 0,
+                usage: None,
                 started: String::new(),
                 history: Vec::new(),
                 error: None,
@@ -71,6 +73,9 @@ impl TrackerApp {
                 ui.label(RichText::new(text).size(12.0).color(MUTED()));
             }
             ui.add_space(8.0);
+            // The form is taller than a small window: its fields scroll, the buttons stay in view.
+            let fields_h = (ctx.screen_rect().height() - 300.0).max(200.0);
+            egui::ScrollArea::vertical().max_height(fields_h).auto_shrink([false, true]).show(ui, |ui| {
             egui::Grid::new("editor_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
                 ui.label("Name");
                 ui.add(field(&mut ed.name, "e.g. Music service", 320.0));
@@ -131,6 +136,17 @@ impl TrackerApp {
                         }
                     }
                 });
+                ui.end_row();
+
+                ui.label("Do you use it?");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut ed.usage, None, "Not said");
+                    for u in Usage::ALL {
+                        ui.selectable_value(&mut ed.usage, Some(u), u.label());
+                    }
+                })
+                .response
+                .on_hover_text("Ones you rarely use are listed on the Overview, so you can decide whether to keep paying.");
                 ui.end_row();
 
                 ui.label("Cancelling");
@@ -198,6 +214,7 @@ impl TrackerApp {
                         .margin(Margin::symmetric(8, 6)),
                 );
                 ui.end_row();
+            });
             });
 
             if let Some(a) = paypal::parse_amount(&ed.amount).filter(|a| *a > 0.0) {
@@ -300,6 +317,7 @@ impl TrackerApp {
                     paid: Vec::new(),
                     price_changes: Vec::new(),
                     notice_days: ed.notice_days,
+                    usage: ed.usage,
                 };
                 let existing = ed.id;
                 self.editor = None;
