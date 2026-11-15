@@ -1,7 +1,7 @@
 //! The window: sidebar, overview, subscription list, add/edit form, PayPal import and settings.
 
 use crate::model::*;
-use crate::paypal::{self, DateOrder, ImportResult};
+use crate::paypal::{self, Columns, DateOrder, ImportResult};
 use crate::{backup, logos, reminders};
 use crate::storage::{self, Loaded};
 use crate::theme::{self, *};
@@ -77,7 +77,17 @@ struct ImportState {
     file_name: Option<String>,
     text: Option<String>,
     order: DateOrder,
+    /// The columns chosen by hand (the others are found).
+    cols: Columns,
+    /// The file's column titles, to choose from.
+    headers: Vec<String>,
     result: Option<Result<ImportResult, String>>,
+}
+
+impl ImportState {
+    fn empty() -> Self {
+        ImportState { file_name: None, text: None, order: DateOrder::Auto, cols: Columns::default(), headers: Vec::new(), result: None }
+    }
 }
 
 enum Confirm {
@@ -189,7 +199,7 @@ impl TrackerApp {
             search: String::new(),
             filter: StatusFilter::All,
             sort: SortBy::NextPayment,
-            import: ImportState { file_name: None, text: None, order: DateOrder::Auto, result: None },
+            import: ImportState::empty(),
             toast,
             screenshot,
             frames: 0,
@@ -447,7 +457,7 @@ impl TrackerApp {
             (Page::Overview, "🏠", "Overview"),
             (Page::Insights, "📊", "Calendar & charts"),
             (Page::Subscriptions, "📋", "Subscriptions"),
-            (Page::Import, "📥", "Import from PayPal"),
+            (Page::Import, "📥", "Import payments"),
             (Page::Settings, "⚙", "Settings"),
         ];
         for (page, icon, label) in items {

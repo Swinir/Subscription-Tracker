@@ -10,6 +10,7 @@ Everything stays on your computer. There's no account, and no server is involved
 - **Subscriptions**: add, edit, pause or cancel subscriptions. Weekly, monthly, yearly and other cycles are supported, along with free trials and shared plans.
 - **Calendar & charts**: what you'll pay each month over the next year, a calendar of payment days, and the yearly cost of each subscription.
 - **History**: the payments that went out are remembered, so you can see what you really paid over the last year, what each subscription has cost you so far, when a price changed, and roughly what a cancellation has saved. A PayPal import fills in the past payments it finds.
+- **Import from your bank or card**: load the transactions you download from your bank (CSV) and the app finds the payments that repeat, picking the shop out of the statement text. If it can't tell which column is which, you choose them.
 - **Import from PayPal**: load a PayPal activity download (CSV) and the app finds the payments that repeat. It understands file layouts in English, German, French, Spanish, Italian and Dutch, and PayPal business reports too. An example file is built in so you can try it without your own.
 - **Reminders**: a system notification a few days before a payment, and before the last day to cancel when a subscription needs notice. On Windows the app can open in the background when you sign in so reminders still arrive.
 - **Multiple currencies**: amounts are converted using the European Central Bank's free daily reference rates. Nothing about you is sent.

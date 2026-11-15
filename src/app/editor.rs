@@ -62,8 +62,13 @@ impl TrackerApp {
                     .size(20.0)
                     .strong(),
             );
-            if ed.source == Source::PayPal {
-                ui.label(RichText::new("Found in your PayPal activity").size(12.0).color(MUTED()));
+            let found_in = match ed.source {
+                Source::PayPal => Some("Found in your PayPal activity"),
+                Source::Bank => Some("Found in your bank statement"),
+                Source::Manual => None,
+            };
+            if let Some(text) = found_in {
+                ui.label(RichText::new(text).size(12.0).color(MUTED()));
             }
             ui.add_space(8.0);
             egui::Grid::new("editor_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {

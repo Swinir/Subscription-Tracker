@@ -1,4 +1,4 @@
-//! The PayPal import page, and files dropped on the window.
+//! The import page (PayPal activity or a bank statement), and files dropped on the window.
 
 use super::*;
 
@@ -33,7 +33,7 @@ impl TrackerApp {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Drop your PayPal activity file to find your subscriptions",
+                "Drop your PayPal or bank file to find your subscriptions",
                 FontId::proportional(22.0),
                 Color32::WHITE,
             );
@@ -42,19 +42,21 @@ impl TrackerApp {
 
     pub(super) fn load_import(&mut self, name: String, text: String) {
         self.import.file_name = Some(name);
+        self.import.headers = paypal::column_names(&text);
         self.import.text = Some(text);
         self.import.order = DateOrder::Auto;
+        self.import.cols = Columns::default();
         self.run_import();
     }
 
     pub(super) fn run_import(&mut self) {
         if let Some(t) = &self.import.text {
-            self.import.result = Some(paypal::analyse(t, self.import.order, self.today, &self.data));
+            self.import.result = Some(paypal::analyse(t, self.import.order, self.import.cols, self.today, &self.data));
         }
     }
 
     pub(super) fn import_page(&mut self, ui: &mut egui::Ui) {
-        page_header(ui, "Import from PayPal", "Find the payments that repeat in your PayPal activity");
+        page_header(ui, "Import payments", "Find the payments that repeat in your PayPal activity or a bank statement");
 
         card_frame(PANEL()).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -75,6 +77,18 @@ impl TrackerApp {
                         ui.add(egui::Label::new(RichText::new(*line.1).color(MUTED())).wrap());
                     });
                 }
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "From your bank or card instead: download your transactions as a CSV file \
+                             (12 months or more) and open that. If a column isn't found, you can choose it once the file is open.",
+                        )
+                        .size(12.5)
+                        .color(MUTED()),
+                    )
+                    .wrap(),
+                );
                 });
 
                 let ui = &mut c[1];
@@ -93,10 +107,10 @@ impl TrackerApp {
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if accent_button(ui, "📂  Choose PayPal file…", 210.0).clicked() {
+                    if accent_button(ui, "📂  Choose a file…", 210.0).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Choose your PayPal activity file")
-                            .add_filter("PayPal activity (CSV)", &["csv", "CSV", "txt"])
+                            .set_title("Choose your PayPal activity or bank statement file")
+                            .add_filter("Payments (CSV)", &["csv", "CSV", "txt"])
                             .add_filter("All files", &["*"])
                             .pick_file()
                         {
@@ -174,6 +188,37 @@ impl TrackerApp {
                     rerun = true;
                 }
             });
+            if !self.import.headers.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Read the").color(MUTED()));
+                    let used = match &self.import.result {
+                        Some(Ok(r)) => r.used,
+                        _ => Columns::default(),
+                    };
+                    let headers = &self.import.headers;
+                    let title = |i: Option<usize>| i.and_then(|i| headers.get(i)).map(|h| h.as_str()).unwrap_or("not found");
+                    let cols = &mut self.import.cols;
+                    for (what, choice, found) in
+                        [("date", &mut cols.date, used.date), ("shop", &mut cols.name, used.name), ("amount", &mut cols.amount, used.amount)]
+                    {
+                        let before = *choice;
+                        let shown = match *choice {
+                            Some(_) => title(*choice).to_string(),
+                            None => format!("Found: {}", title(found)),
+                        };
+                        ui.label(RichText::new(format!("{what} from")).color(MUTED()));
+                        egui::ComboBox::from_id_salt(("import_col", what)).selected_text(shown).width(170.0).show_ui(ui, |ui| {
+                            ui.selectable_value(choice, None, "Find it for me");
+                            for (i, h) in headers.iter().enumerate() {
+                                ui.selectable_value(choice, Some(i), h.as_str());
+                            }
+                        });
+                        if before != *choice {
+                            rerun = true;
+                        }
+                    }
+                });
+            }
             ui.add_space(6.0);
 
             match &mut self.import.result {
@@ -350,10 +395,11 @@ impl TrackerApp {
             self.run_import();
         }
         if clear {
-            self.import = ImportState { file_name: None, text: None, order: DateOrder::Auto, result: None };
+            self.import = ImportState::empty();
         }
         if add_now {
             if let Some(Ok(r)) = self.import.result.take() {
+                let (source, from) = if r.bank { (Source::Bank, "your bank statement") } else { (Source::PayPal, "PayPal") };
                 let chosen: Vec<_> = r.candidates.into_iter().filter(|c| c.selected).collect();
                 if self.data.subscriptions.is_empty() {
                     // First subscriptions: use their most common currency for the totals.
@@ -421,9 +467,9 @@ impl TrackerApp {
                         billing_day: c.last_date.day(),
                         category: c.category.clone(),
                         status: Status::Active,
-                        source: Source::PayPal,
+                        source,
                         notes: format!(
-                            "From PayPal: paid {} time{} between {} and {}",
+                            "From {from}: paid {} time{} between {} and {}",
                             c.count,
                             plural(c.count),
                             c.first_date.format("%d %b %Y"),
@@ -437,12 +483,12 @@ impl TrackerApp {
                     self.data.add(s);
                 }
                 self.dirty = true;
-                self.import = ImportState { file_name: None, text: None, order: DateOrder::Auto, result: None };
+                self.import = ImportState::empty();
                 self.page = Page::Subscriptions;
                 self.notify(match (added, updated) {
-                    (a, 0) => format!("Added {a} subscription{} from PayPal", plural(a)),
-                    (0, u) => format!("Updated {u} subscription{} with PayPal's new price", plural(u)),
-                    (a, u) => format!("Added {a} and updated {u} subscription{} from PayPal", plural(a + u)),
+                    (a, 0) => format!("Added {a} subscription{} from {from}", plural(a)),
+                    (0, u) => format!("Updated {u} subscription{} with the new price from {from}", plural(u)),
+                    (a, u) => format!("Added {a} and updated {u} subscription{} from {from}", plural(a + u)),
                 });
             }
         }

@@ -94,6 +94,8 @@ impl Status {
 pub enum Source {
     Manual,
     PayPal,
+    /// Found in a bank or card statement.
+    Bank,
 }
 
 impl Source {
@@ -101,6 +103,7 @@ impl Source {
         match self {
             Source::Manual => "Manual",
             Source::PayPal => "PayPal",
+            Source::Bank => "Bank statement",
         }
     }
 }

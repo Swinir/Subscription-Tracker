@@ -231,7 +231,7 @@ impl TrackerApp {
                 ui.add_space(6.0);
                 ui.label(RichText::new("No subscriptions yet").size(22.0).strong());
                 ui.label(
-                    RichText::new("Add them by hand, or let the app find them in your PayPal activity.").color(MUTED()),
+                    RichText::new("Add them by hand, or let the app find them in your PayPal activity or a bank statement.").color(MUTED()),
                 );
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
@@ -240,7 +240,7 @@ impl TrackerApp {
                     if accent_button(ui, "➕  Add subscription", 190.0).clicked() {
                         self.open_editor(None);
                     }
-                    if plain_button(ui, "📥  Import from PayPal", 190.0).clicked() {
+                    if plain_button(ui, "📥  Import payments", 190.0).clicked() {
                         self.page = Page::Import;
                     }
                     if plain_button(ui, "Show examples", 190.0).clicked() {

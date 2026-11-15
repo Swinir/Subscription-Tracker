@@ -127,8 +127,10 @@ impl TrackerApp {
                 if dim { MUTED() } else { TEXT() },
             );
             let mut sub = if s.category.is_empty() { "Other".to_string() } else { s.category.clone() };
-            if s.source == Source::PayPal {
-                sub.push_str(" · from PayPal");
+            match s.source {
+                Source::PayPal => sub.push_str(" · from PayPal"),
+                Source::Bank => sub.push_str(" · from your bank"),
+                Source::Manual => {}
             }
             if s.is_shared() {
                 sub.push_str(&format!(" · shared by {}", s.shared_by));
