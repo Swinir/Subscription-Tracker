@@ -53,6 +53,8 @@ pub struct Candidate {
     pub existing_id: Option<u64>,
     /// Its price in the list, when PayPal now shows a different one.
     pub old_amount: Option<f64>,
+    /// The payments found for it: day and full amount, oldest first.
+    pub paid: Vec<(NaiveDate, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -630,6 +632,7 @@ fn candidate(name: &str, s: &Series, cycle: Cycle, mut reason: String, confident
         currency: latest.currency.clone(),
         cycle,
         count: s.items.len(),
+        paid: s.items.iter().map(|p| (p.date, p.amount)).collect(),
         first_date: s.first().date,
         last_date: latest.date,
         next_payment: next,
@@ -982,6 +985,11 @@ mod tests {
             website: String::new(),
             trial_until: None,
             shared_by: 1,
+            started_on: None,
+            cancelled_on: None,
+            paid: Vec::new(),
+            price_changes: Vec::new(),
+            notice_days: 0,
         });
         let csv = "Datum;Uhrzeit;Name;Typ;Status;Währung;Brutto\n\
                    01.09.2026;10:00;Musikdienst;Abonnementzahlung;Abgeschlossen;EUR;-9,99\n\

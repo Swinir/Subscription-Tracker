@@ -1,6 +1,6 @@
 //! Saving and loading the person's subscriptions, and exporting them as CSV.
 
-use crate::model::Data;
+use crate::model::{Data, ReadError};
 use std::path::{Path, PathBuf};
 
 pub fn data_path() -> PathBuf {
@@ -15,6 +15,8 @@ pub enum Loaded {
     Found(Data),
     /// The file couldn't be read; it was moved aside to this path.
     Broken(PathBuf),
+    /// The file was saved by a newer version of the app; it was left alone.
+    Newer,
 }
 
 pub fn load() -> Loaded {
@@ -22,9 +24,10 @@ pub fn load() -> Loaded {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Loaded::Fresh;
     };
-    match serde_json::from_str::<Data>(&text) {
+    match Data::from_json(&text) {
         Ok(d) => Loaded::Found(d),
-        Err(_) => {
+        Err(ReadError::Newer) => Loaded::Newer,
+        Err(ReadError::NotAList) => {
             let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let aside = path.with_file_name(format!("subscriptions-unreadable-{stamp}.json"));
             let _ = std::fs::rename(&path, &aside);
@@ -48,9 +51,11 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
     let mut w = csv::Writer::from_path(path).map_err(|e| e.to_string())?;
     w.write_record([
         "Name", "Amount", "Currency", "Billing cycle", "Next payment", "Monthly cost", "Yearly cost", "Category", "Status",
-        "Added from", "Notes", "Website", "Shared by", "Free trial until",
+        "Added from", "Notes", "Website", "Shared by", "Free trial until", "Started on", "Cancelled on", "Payments so far",
+        "Paid so far", "Days of notice to cancel",
     ])
     .map_err(|e| e.to_string())?;
+    let day = |d: Option<chrono::NaiveDate>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default();
     for s in &data.subscriptions {
         w.write_record([
             s.name.clone(),
@@ -66,7 +71,12 @@ pub fn export_csv(path: &Path, data: &Data) -> Result<(), String> {
             s.notes.clone(),
             s.website.clone(),
             s.shared_by.max(1).to_string(),
-            s.trial_until.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+            day(s.trial_until),
+            day(s.started_on),
+            day(s.cancelled_on),
+            s.paid.len().to_string(),
+            s.paid_totals().iter().map(|(c, v)| format!("{v:.2} {c}")).collect::<Vec<_>>().join(" + "),
+            s.notice_days.to_string(),
         ])
         .map_err(|e| e.to_string())?;
     }

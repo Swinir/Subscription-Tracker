@@ -130,6 +130,38 @@ pub struct Subscription {
     /// How many people share the cost (you included); totals count your share.
     #[serde(default = "one_person")]
     pub shared_by: u32,
+    /// The day you signed up, when known.
+    #[serde(default)]
+    pub started_on: Option<NaiveDate>,
+    /// The day it was marked cancelled.
+    #[serde(default)]
+    pub cancelled_on: Option<NaiveDate>,
+    /// The payments that have gone out, oldest first, one per day.
+    #[serde(default)]
+    pub paid: Vec<Paid>,
+    /// The price changes, oldest first.
+    #[serde(default)]
+    pub price_changes: Vec<PriceChange>,
+    /// How many days before a renewal it must be cancelled (0: any time).
+    #[serde(default)]
+    pub notice_days: u32,
+}
+
+/// A payment that went out: what you paid (your share) and when.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Paid {
+    pub date: NaiveDate,
+    pub amount: f64,
+    pub currency: String,
+}
+
+/// The full price went from one amount to another on this day.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PriceChange {
+    pub date: NaiveDate,
+    pub from: f64,
+    pub to: f64,
+    pub currency: String,
 }
 
 fn one_person() -> u32 {
@@ -163,11 +195,84 @@ impl Subscription {
         self.status == Status::Active
     }
 
-    /// Moves the next payment date forward until it is today or later.
+    /// Notes a payment that went out, keeping the log in date order with one entry per day.
+    pub fn record_paid(&mut self, date: NaiveDate, amount: f64, currency: &str) {
+        if let Err(i) = self.paid.binary_search_by_key(&date, |p| p.date) {
+            self.paid.insert(i, Paid { date, amount, currency: currency.to_uppercase() });
+        }
+    }
+
+    /// Changes the price, remembering the old one.
+    pub fn set_price(&mut self, amount: f64, date: NaiveDate) {
+        if (self.amount - amount).abs() > 0.004 {
+            self.price_changes.push(PriceChange { date, from: self.amount, to: amount, currency: self.currency.clone() });
+            self.price_changes.sort_by_key(|c| c.date);
+            self.amount = amount;
+        }
+    }
+
+    /// Takes the values of the edit form, keeping what the form doesn't show
+    /// (the payment log) and noting a price change or a cancellation.
+    pub fn apply_edit(&mut self, mut edited: Subscription, today: NaiveDate) {
+        edited.id = self.id;
+        edited.paid = std::mem::take(&mut self.paid);
+        edited.price_changes = std::mem::take(&mut self.price_changes);
+        edited.cancelled_on = match edited.status {
+            Status::Cancelled => self.cancelled_on.or(Some(today)),
+            _ => None,
+        };
+        // A new billing cycle or currency makes the two prices incomparable: no change is noted.
+        if edited.cycle == self.cycle && edited.currency.eq_ignore_ascii_case(&self.currency) {
+            let new_price = std::mem::replace(&mut edited.amount, self.amount);
+            edited.set_price(new_price, today);
+        }
+        *self = edited;
+    }
+
+    /// The nearest last day to cancel that hasn't passed (today counts), and the payment
+    /// cancelling by then avoids. None when it can be cancelled any time, or isn't running.
+    pub fn cancel_by(&self, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+        if self.notice_days == 0 || !self.is_active() {
+            return None;
+        }
+        // With a long notice the day for the next payment may be gone: look at the ones after.
+        let mut payment = self.next_payment;
+        for _ in 0..60 {
+            let by = payment - Duration::days(self.notice_days as i64);
+            if by >= today {
+                return Some((by, payment));
+            }
+            payment = self.cycle.advance(payment, self.billing_day);
+        }
+        None
+    }
+
+    /// Everything paid so far, per currency.
+    pub fn paid_totals(&self) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for p in &self.paid {
+            *out.entry(p.currency.clone()).or_default() += p.amount;
+        }
+        out
+    }
+
+    /// Roughly what cancelling has saved so far (your share, in its own currency).
+    pub fn saved_since_cancelling(&self, today: NaiveDate) -> Option<f64> {
+        let since = self.cancelled_on.filter(|_| self.status == Status::Cancelled)?;
+        let days = (today - since).num_days().max(0) as f64;
+        Some(self.yearly_cost() * days / 365.25)
+    }
+
+    /// Moves the next payment date forward until it is today or later. The dates
+    /// passed on the way are payments that went out (when the subscription is active).
     pub fn roll_forward(&mut self, today: NaiveDate) -> bool {
         let mut changed = false;
         let mut guard = 0;
         while self.next_payment < today && guard < 2000 {
+            if self.is_active() {
+                let currency = self.currency.clone();
+                self.record_paid(self.next_payment, self.my_amount(), &currency);
+            }
             self.next_payment = self.cycle.advance(self.next_payment, self.billing_day);
             changed = true;
             guard += 1;
@@ -176,8 +281,23 @@ impl Subscription {
     }
 }
 
+/// The layout of the saved file. Raise it, and convert in `Data::from_json`, when a change
+/// can't be read back through field defaults.
+pub const DATA_VERSION: u32 = 1;
+
+/// Why a file couldn't be read as a list.
+#[derive(Debug, PartialEq)]
+pub enum ReadError {
+    NotAList,
+    /// Saved by a newer version of the app: reading it here would drop what this version doesn't know.
+    Newer,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Data {
+    /// The file layout this was saved with (0: before layouts were numbered).
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
     #[serde(default = "one")]
@@ -196,6 +316,9 @@ pub struct Data {
     /// Payments already reminded about (subscription id, payment date).
     #[serde(default)]
     pub reminded: Vec<(u64, NaiveDate)>,
+    /// Last days to cancel already reminded about (subscription id, that day).
+    #[serde(default)]
+    pub reminded_cancel: Vec<(u64, NaiveDate)>,
     /// Folder that receives a copy after every change (empty: no backups).
     #[serde(default)]
     pub backup_dir: String,
@@ -265,6 +388,7 @@ fn default_currency() -> String {
 impl Default for Data {
     fn default() -> Self {
         Data {
+            version: DATA_VERSION,
             subscriptions: Vec::new(),
             next_id: 1,
             main_currency: default_currency(),
@@ -272,6 +396,7 @@ impl Default for Data {
             reminders: true,
             remind_days: 3,
             reminded: Vec::new(),
+            reminded_cancel: Vec::new(),
             backup_dir: String::new(),
             backup_keep: 30,
             budget: 0.0,
@@ -285,6 +410,17 @@ impl Default for Data {
 }
 
 impl Data {
+    /// Reads a saved list, bringing an older layout up to date.
+    pub fn from_json(text: &str) -> Result<Data, ReadError> {
+        let mut d: Data = serde_json::from_str(text).map_err(|_| ReadError::NotAList)?;
+        if d.version > DATA_VERSION {
+            return Err(ReadError::Newer);
+        }
+        // Layouts 0 and 1 differ only in fields that have defaults.
+        d.version = DATA_VERSION;
+        Ok(d)
+    }
+
     pub fn add(&mut self, mut s: Subscription) -> u64 {
         let used_max = self.subscriptions.iter().map(|s| s.id).max().unwrap_or(0);
         self.next_id = self.next_id.max(used_max + 1);
@@ -413,7 +549,7 @@ impl Data {
             // Show the options too: one shared plan and one free trial.
             let shared_by = if name == "Video streaming" { 2 } else { 1 };
             let trial_until = if name == "Language course app" { Some(date) } else { None };
-            self.add(Subscription {
+            let mut s = Subscription {
                 trial_until,
                 shared_by,
                 id: 0,
@@ -428,7 +564,33 @@ impl Data {
                 source,
                 notes: "Example".to_string(),
                 website: String::new(),
-            });
+                started_on: None,
+                cancelled_on: None,
+                paid: Vec::new(),
+                price_changes: Vec::new(),
+                // One that needs a week's notice, so its last day to cancel shows.
+                notice_days: if name == "Gym membership" { 7 } else { 0 },
+            };
+            // A year of past payments (none for the one still in its free trial): rolling
+            // forward from a year back logs them and lands on the same next payment.
+            if s.trial_until.is_none() {
+                let start = match cycle {
+                    Cycle::Weekly => date - Duration::days(7 * 52),
+                    _ => date.checked_sub_months(Months::new(12)).unwrap_or(date),
+                };
+                s.started_on = Some(start);
+                s.next_payment = start;
+                s.roll_forward(today);
+            }
+            // And one price rise, four months ago.
+            if name == "Video streaming" {
+                let rise = today - Duration::days(120);
+                s.price_changes.push(PriceChange { date: rise, from: 11.99, to: amount, currency: cur.to_string() });
+                for p in s.paid.iter_mut().filter(|p| p.date < rise) {
+                    p.amount = 11.99 / shared_by as f64;
+                }
+            }
+            self.add(s);
         }
     }
 }
@@ -570,6 +732,106 @@ mod tests {
         assert!((d.to_main(10.0, "BRL").unwrap() - 2.0).abs() < 1e-9);
         d.convert = false;
         assert_eq!(d.to_main(10.0, "USD"), None);
+    }
+
+    #[test]
+    fn passed_payments_are_logged() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        // A year of the monthly one, at half price (it's shared by two), cheaper before the rise.
+        let video = d.find_by_name("Video streaming").unwrap();
+        assert_eq!(video.paid.len(), 12);
+        assert!(video.paid.windows(2).all(|w| w[0].date < w[1].date));
+        assert!((video.paid[0].amount - 11.99 / 2.0).abs() < 1e-9);
+        assert!((video.paid[11].amount - 13.99 / 2.0).abs() < 1e-9);
+        assert_eq!(video.next_payment, today + Duration::days(3));
+        // Nothing goes out for a paused one, or before a trial ends.
+        assert!(d.find_by_name("Meal kit box").unwrap().paid.is_empty());
+        assert!(d.find_by_name("Language course app").unwrap().paid.is_empty());
+        // Rolling again over the same days adds nothing; a later day adds the payment that passed.
+        let mut video = video.clone();
+        assert!(!video.roll_forward(today));
+        assert!(video.roll_forward(today + Duration::days(4)));
+        assert_eq!(video.paid.len(), 13);
+        assert_eq!(video.paid_totals().len(), 1);
+    }
+
+    #[test]
+    fn editing_keeps_history() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let s = d.subscriptions.iter_mut().find(|s| s.name == "Music service").unwrap();
+        let paid = s.paid.len();
+        // What the form hands back: no history, a new price.
+        let mut form = s.clone();
+        form.paid.clear();
+        form.amount = 12.99;
+        s.apply_edit(form, today);
+        assert_eq!(s.paid.len(), paid);
+        assert_eq!(s.price_changes.len(), 1);
+        assert_eq!((s.price_changes[0].from, s.price_changes[0].to, s.price_changes[0].date), (10.99, 12.99, today));
+        // Saving again without a change notes nothing.
+        s.apply_edit(s.clone(), today);
+        assert_eq!(s.price_changes.len(), 1);
+        // A different billing cycle isn't a price change.
+        let mut form = s.clone();
+        form.cycle = Cycle::Yearly;
+        form.amount = 120.0;
+        s.apply_edit(form, today);
+        assert_eq!((s.amount, s.price_changes.len()), (120.0, 1));
+        // Cancelling is dated once, and undone by reactivating.
+        let mut form = s.clone();
+        form.status = Status::Cancelled;
+        s.apply_edit(form, today);
+        s.apply_edit(s.clone(), today + Duration::days(30));
+        assert_eq!(s.cancelled_on, Some(today));
+        let saved = s.saved_since_cancelling(today + Duration::days(366)).unwrap();
+        assert!((saved - 120.0).abs() < 1.0, "{saved}");
+        let mut form = s.clone();
+        form.status = Status::Active;
+        s.apply_edit(form, today);
+        assert_eq!(s.cancelled_on, None);
+        assert_eq!(s.saved_since_cancelling(today), None);
+    }
+
+    #[test]
+    fn last_day_to_cancel() {
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        let mut d = Data::default();
+        d.add_examples(day(11, 11));
+        // The gym is paid on the 19th and needs a week's notice.
+        let gym = d.subscriptions.iter_mut().find(|s| s.name == "Gym membership").unwrap();
+        assert_eq!(gym.cancel_by(day(11, 11)), Some((day(11, 12), day(11, 19))));
+        assert_eq!(gym.cancel_by(day(11, 12)), Some((day(11, 12), day(11, 19))));
+        // Too late for that payment: the day for the one after.
+        assert_eq!(gym.cancel_by(day(11, 13)), Some((day(12, 12), day(12, 19))));
+        gym.status = Status::Paused;
+        assert_eq!(gym.cancel_by(day(11, 11)), None);
+        // No notice needed: no last day.
+        assert_eq!(d.find_by_name("Music service").unwrap().cancel_by(day(11, 11)), None);
+    }
+
+    #[test]
+    fn reading_saved_files() {
+        // A file from before layouts were numbered and before history was kept.
+        let old = r#"{"subscriptions":[{"id":1,"name":"News","amount":5.0,"currency":"EUR","cycle":"Monthly",
+            "next_payment":"2026-12-01","status":"Active","source":"Manual"}],"next_id":2}"#;
+        let d = Data::from_json(old).unwrap();
+        assert_eq!(d.version, DATA_VERSION);
+        assert!(d.subscriptions[0].paid.is_empty() && d.subscriptions[0].started_on.is_none());
+        // What this version saves reads back the same.
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = Data::default();
+        d.add_examples(today);
+        let back = Data::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.subscriptions[0].paid, d.subscriptions[0].paid);
+        assert_eq!(back.subscriptions[0].price_changes, d.subscriptions[0].price_changes);
+        // A newer layout is refused rather than read with parts missing.
+        let newer = format!(r#"{{"version":{},"subscriptions":[]}}"#, DATA_VERSION + 1);
+        assert_eq!(Data::from_json(&newer).unwrap_err(), ReadError::Newer);
+        assert_eq!(Data::from_json("not json").unwrap_err(), ReadError::NotAList);
     }
 
     #[test]

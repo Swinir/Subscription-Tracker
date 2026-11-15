@@ -19,6 +19,30 @@ pub fn due_soon(data: &Data, today: NaiveDate, days: u32) -> Vec<&Subscription> 
     v
 }
 
+/// Subscriptions whose last day to cancel is between today and `days` from now, soonest
+/// first: the subscription, that day, and the payment cancelling by then avoids.
+pub fn cancel_soon(data: &Data, today: NaiveDate, days: u32) -> Vec<(&Subscription, NaiveDate, NaiveDate)> {
+    let mut v: Vec<(&Subscription, NaiveDate, NaiveDate)> = data
+        .subscriptions
+        .iter()
+        .filter_map(|s| s.cancel_by(today).map(|(by, payment)| (s, by, payment)))
+        .filter(|(_, by, _)| (*by - today).num_days() <= days as i64)
+        .collect();
+    v.sort_by_key(|(_, by, _)| *by);
+    v
+}
+
+/// "Gym membership: last day to cancel is tomorrow, before €34.90 on 23 Nov".
+pub fn cancel_line(s: &Subscription, by: NaiveDate, payment: NaiveDate, today: NaiveDate) -> String {
+    format!(
+        "{}: last day to cancel is {}, before {} on {}",
+        s.name,
+        when(by, today),
+        format_money(s.amount, &s.currency),
+        payment.format("%d %b")
+    )
+}
+
 pub fn when(d: NaiveDate, today: NaiveDate) -> String {
     match (d - today).num_days() {
         0 => "today".into(),
@@ -38,13 +62,14 @@ pub fn line(s: &Subscription, today: NaiveDate) -> String {
     }
 }
 
-/// One line per payment: "Music service €10.99 tomorrow".
-pub fn describe(list: &[&Subscription], today: NaiveDate, max: usize) -> String {
-    let mut parts: Vec<String> = list.iter().take(max).map(|s| line(s, today)).collect();
-    if list.len() > max {
-        parts.push(format!("and {} more", list.len() - max));
+/// The first `max` lines, one each, then "and 2 more".
+pub fn describe(mut lines: Vec<String>, max: usize) -> String {
+    let more = lines.len().saturating_sub(max);
+    lines.truncate(max);
+    if more > 0 {
+        lines.push(format!("and {more} more"));
     }
-    parts.join("\n")
+    lines.join("\n")
 }
 
 fn xml_escape(s: &str) -> String {
@@ -171,6 +196,20 @@ pub fn set_open_at_sign_in(on: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn last_days_to_cancel() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut d = crate::model::Data::default();
+        d.add_examples(today);
+        // Only the gym needs notice: a week before its payment in 8 days, so tomorrow.
+        let soon = super::cancel_soon(&d, today, 3);
+        assert_eq!(soon.len(), 1);
+        let (s, by, payment) = soon[0];
+        assert_eq!(super::cancel_line(s, by, payment, today), "Gym membership: last day to cancel is tomorrow, before €34.90 on 19 Nov");
+        assert!(super::cancel_soon(&d, today, 0).is_empty());
+        assert_eq!(super::describe(vec!["a".into(), "b".into(), "c".into()], 2), "a\nb\nand 1 more");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn base64() {

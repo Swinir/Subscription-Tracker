@@ -2,7 +2,7 @@
 //! service (OneDrive, Google Drive, Dropbox, iCloud, Proton Drive) keeps in sync:
 //! that service's own app then uploads the copies, so no sign-in is needed here.
 
-use crate::model::Data;
+use crate::model::{Data, ReadError};
 use std::path::{Path, PathBuf};
 
 /// The folder inside the chosen place that holds the copies.
@@ -147,7 +147,10 @@ pub fn list(dir: &Path) -> Vec<BackupFile> {
 /// Reads a backup (or any file saved by this app).
 pub fn read(path: &Path) -> Result<Data, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("couldn't open it: {e}"))?;
-    serde_json::from_str::<Data>(&text).map_err(|_| "this file isn't a Subscription Tracker list.".to_string())
+    Data::from_json(&text).map_err(|e| match e {
+        ReadError::Newer => "it was saved by a newer version of the app; update the app first.".to_string(),
+        ReadError::NotAList => "this file isn't a Subscription Tracker list.".to_string(),
+    })
 }
 
 #[cfg(test)]
