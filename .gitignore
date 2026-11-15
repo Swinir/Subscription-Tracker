@@ -1,0 +1,6 @@
+/target
+/.toolchain
+/shots
+# Machine-specific build setup (absolute paths, 67 MB LLVM binary)
+/tools
+/.cargo
